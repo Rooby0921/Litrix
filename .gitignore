@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Private source and build artifacts
+.build/
+Sources/
+Package.swift
+publish.sh
+build_dmg.sh
+papers/
+litrix2.png
+Litrix.app
+
+# Temporary packaging output
+rw.*.dmg
