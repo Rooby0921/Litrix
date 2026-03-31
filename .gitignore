@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# App bundles and installers
+*.app
+*.dmg
+
+# Local packaging output
+dist/
+
+# Editors
+.vscode/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local sample data
+papers/*
+!papers/.gitkeep
