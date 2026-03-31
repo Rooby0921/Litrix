@@ -7,7 +7,7 @@ source "${SCRIPT_DIR}/version.sh"
 
 APP_NAME="Litrix"
 BUNDLE_ID="com.rooby.Litrix"
-APP_VERSION="${LITRIX_APP_VERSION:-1.0-beta1}"
+APP_VERSION="${LITRIX_APP_VERSION:-1.77}"
 MIN_MACOS_VERSION="14.0"
 ICON_SOURCE="litrix3.png"
 ICON_FILE="${APP_NAME}.icns"
@@ -21,8 +21,8 @@ usage() {
 
 示例:
   ./package_app_arm.sh
-  ./package_app_arm.sh -v 1.0-beta1
-  ./package_app_arm.sh -v 1.0beta1 -o ./dist
+  ./package_app_arm.sh -v 1.77
+  ./package_app_arm.sh -v 1.77 -o ./dist
 EOF
 }
 

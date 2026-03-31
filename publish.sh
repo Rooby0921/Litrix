@@ -7,11 +7,12 @@ source "${SCRIPT_DIR}/version.sh"
 
 APP_NAME="Litrix"
 BUNDLE_ID="com.rooby.Litrix"
-APP_VERSION="${LITRIX_APP_VERSION:-1.0-beta1}"
+APP_VERSION="${LITRIX_APP_VERSION:-1.77}"
 DMG_NAME="Litrix-${APP_VERSION}.dmg"
 ICON_SOURCE="litrix3.png"
 ICON_FILE="${APP_NAME}.icns"
 ICONSET_DIR="${APP_NAME}.iconset"
+USE_CREATE_DMG="${LITRIX_USE_CREATE_DMG:-0}"
 
 echo "🚀 第一步：正在编译通用二进制文件 (Universal Binary)..."
 swift build -c release --arch arm64 --arch x86_64
@@ -50,8 +51,11 @@ cat <<EOF > "${APP_NAME}.app/Contents/Info.plist"
 EOF
 
 echo "⚙️ 第四步：拷贝并授权二进制文件..."
-BINARY_PATH=$(find .build -type f -name "${APP_NAME}" | grep -E '/(release|Release)/' | head -n 1 || true)
-if [ -z "$BINARY_PATH" ]; then
+BINARY_PATH=".build/apple/Products/Release/${APP_NAME}"
+if [ ! -f "$BINARY_PATH" ]; then
+    BINARY_PATH=$(find .build -type f -name "${APP_NAME}" | grep -E '/(release|Release)/' | head -n 1 || true)
+fi
+if [ -z "$BINARY_PATH" ] || [ ! -f "$BINARY_PATH" ]; then
     echo "❌ 错误：找不到编译产物，请检查项目是否能正常编译。"
     exit 1
 fi
@@ -78,11 +82,25 @@ if [ -f "${ICON_SOURCE}" ] && command -v sips >/dev/null 2>&1 && command -v icon
     rm -rf "${ICONSET_DIR}"
 fi
 
-echo "▶️ 第五步：启动 ${APP_NAME}.app..."
-open "./${APP_NAME}.app"
+create_fallback_dmg() {
+    local staging_dir="${APP_NAME}-dmg-root"
+    rm -rf "${staging_dir}"
+    mkdir -p "${staging_dir}"
+    cp -R "${APP_NAME}.app" "${staging_dir}/"
+    ln -s /Applications "${staging_dir}/Applications"
 
-if command -v create-dmg >/dev/null 2>&1; then
-    echo "💿 第六步：生成 DMG 安装包..."
+    hdiutil create \
+      -volname "${APP_NAME} Installer" \
+      -srcfolder "${staging_dir}" \
+      -ov \
+      -format UDZO \
+      "$DMG_NAME"
+
+    rm -rf "${staging_dir}"
+}
+
+if [ "${USE_CREATE_DMG}" = "1" ] && command -v create-dmg >/dev/null 2>&1; then
+    echo "💿 第五步：生成 DMG 安装包..."
     rm -f "$DMG_NAME"
     create-dmg \
       --volname "${APP_NAME} Installer" \
@@ -97,6 +115,8 @@ if command -v create-dmg >/dev/null 2>&1; then
 
     echo "✅ 全部完成！最终安装包：$DMG_NAME"
 else
-    echo "ℹ️ 未安装 create-dmg，已跳过 DMG。"
-    echo "✅ 已完成 ${APP_NAME}.app 构建并启动。"
+    echo "ℹ️ 使用 hdiutil 生成基础 DMG。若需 Finder 布局版 DMG，可设置 LITRIX_USE_CREATE_DMG=1。"
+    rm -f "$DMG_NAME"
+    create_fallback_dmg
+    echo "✅ 全部完成！最终安装包：$DMG_NAME"
 fi

@@ -96,7 +96,7 @@ build_one "C-hybrid-space-topbridge" "" "Litrix Method C" \
 "Method C: hybrid spacing (native + custom) + measured top bridge for right pane."
 
 cat > "${OUT_DIR}/COMPARE_NOTES.md" <<'EOF'
-# Litrix 1.0-beta1 Strategy Compare
+# Litrix 1.77 Strategy Compare
 
 - A-native-toolbar-safearea
   - Toolbar: native spacers
