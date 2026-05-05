@@ -14,6 +14,17 @@ enum AdvancedSearchMatchMode: String, CaseIterable, Identifiable {
             return "Any"
         }
     }
+
+    func title(for language: AppLanguage) -> String {
+        guard language == .chinese else { return title }
+
+        switch self {
+        case .all:
+            return "全部"
+        case .any:
+            return "任意"
+        }
+    }
 }
 
 enum AdvancedSearchField: String, CaseIterable, Identifiable {
@@ -25,6 +36,7 @@ enum AdvancedSearchField: String, CaseIterable, Identifiable {
     case year
     case doi
     case abstractText
+    case chineseAbstract
     case volume
     case issue
     case pages
@@ -46,9 +58,11 @@ enum AdvancedSearchField: String, CaseIterable, Identifiable {
     case country
     case keywords
     case limitations
+    case webPageURL
     case tags
     case collections
     case attachmentStatus
+    case fullText  // Extract and search within PDF body text via PDFKit
 
     var id: String { rawValue }
 
@@ -70,6 +84,8 @@ enum AdvancedSearchField: String, CaseIterable, Identifiable {
             return "DOI"
         case .abstractText:
             return "Abstract"
+        case .chineseAbstract:
+            return "Chinese Abstract"
         case .volume:
             return "Volume"
         case .issue:
@@ -112,12 +128,93 @@ enum AdvancedSearchField: String, CaseIterable, Identifiable {
             return "Keywords"
         case .limitations:
             return "Limitations"
+        case .webPageURL:
+            return "Web Link"
         case .tags:
             return "Tags"
         case .collections:
             return "Collections"
         case .attachmentStatus:
             return "Attachment Status"
+        case .fullText:
+            return "Full Text"
+        }
+    }
+
+    func title(for language: AppLanguage) -> String {
+        guard language == .chinese else { return title }
+
+        switch self {
+        case .title:
+            return "标题"
+        case .englishTitle:
+            return "英文标题"
+        case .authors:
+            return "作者"
+        case .authorsEnglish:
+            return "英文作者"
+        case .source:
+            return "来源"
+        case .year:
+            return "年份"
+        case .doi:
+            return "DOI"
+        case .abstractText:
+            return "摘要"
+        case .chineseAbstract:
+            return "中文摘要"
+        case .volume:
+            return "卷"
+        case .issue:
+            return "期"
+        case .pages:
+            return "页码"
+        case .paperType:
+            return "文献类型"
+        case .notes:
+            return "笔记"
+        case .rqs:
+            return "研究问题"
+        case .conclusion:
+            return "结论"
+        case .results:
+            return "结果"
+        case .category:
+            return "类别"
+        case .impactFactor:
+            return "影响因子"
+        case .samples:
+            return "样本"
+        case .participantType:
+            return "参与者类型"
+        case .variables:
+            return "变量"
+        case .dataCollection:
+            return "数据收集"
+        case .dataAnalysis:
+            return "数据分析"
+        case .methodology:
+            return "方法"
+        case .theoreticalFoundation:
+            return "理论基础"
+        case .educationalLevel:
+            return "教育阶段"
+        case .country:
+            return "国家"
+        case .keywords:
+            return "关键词"
+        case .limitations:
+            return "局限"
+        case .webPageURL:
+            return "网页链接"
+        case .tags:
+            return "标签"
+        case .collections:
+            return "分类"
+        case .attachmentStatus:
+            return "附件状态"
+        case .fullText:
+            return "全文"
         }
     }
 
@@ -139,6 +236,8 @@ enum AdvancedSearchField: String, CaseIterable, Identifiable {
             return paper.doi
         case .abstractText:
             return paper.abstractText
+        case .chineseAbstract:
+            return paper.chineseAbstract
         case .volume:
             return paper.volume
         case .issue:
@@ -181,6 +280,8 @@ enum AdvancedSearchField: String, CaseIterable, Identifiable {
             return paper.keywords
         case .limitations:
             return paper.limitations
+        case .webPageURL:
+            return paper.webPageURL
         case .tags:
             return paper.tags.joined(separator: ", ")
         case .collections:
@@ -189,6 +290,8 @@ enum AdvancedSearchField: String, CaseIterable, Identifiable {
             return paper.storedPDFFileName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
                 ? "Attached"
                 : "Missing"
+        case .fullText:
+            return paper.storedPDFFileName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         }
     }
 }
@@ -217,6 +320,25 @@ enum AdvancedSearchOperator: String, CaseIterable, Identifiable {
             return "Ends With"
         case .isEmpty:
             return "Is Empty"
+        }
+    }
+
+    func title(for language: AppLanguage) -> String {
+        guard language == .chinese else { return title }
+
+        switch self {
+        case .contains:
+            return "包含"
+        case .notContains:
+            return "不包含"
+        case .equals:
+            return "等于"
+        case .beginsWith:
+            return "开头为"
+        case .endsWith:
+            return "结尾为"
+        case .isEmpty:
+            return "为空"
         }
     }
 
@@ -342,14 +464,14 @@ struct CitationSearchQuery {
 
     private let entries: [CitationEntry]
 
-    private static let citationPattern = try! NSRegularExpression(
+    private static let citationPattern = try? NSRegularExpression(
         pattern: #"([^;()]+?)\s*,\s*(\d{4}[a-zA-Z]?)"#
     )
-    private static let fallbackPattern = try! NSRegularExpression(
+    private static let fallbackPattern = try? NSRegularExpression(
         pattern: #"([^;()]+?)\s+(\d{4}[a-zA-Z]?)"#
     )
-    private static let yearPattern = try! NSRegularExpression(pattern: #"\b(\d{4})\b"#)
-    private static let etAlPattern = try! NSRegularExpression(pattern: #"\bet\s+al\.?\b"#, options: .caseInsensitive)
+    private static let yearPattern = try? NSRegularExpression(pattern: #"\b(\d{4})\b"#)
+    private static let etAlPattern = try? NSRegularExpression(pattern: #"\bet\s+al\.?\b"#, options: .caseInsensitive)
 
     init?(rawValue: String) {
         let normalizedInput = Self.normalizedCitationInput(rawValue)
@@ -365,6 +487,9 @@ struct CitationSearchQuery {
     }
 
     private static func parseEntries(from value: String) -> [CitationEntry] {
+        guard let citationPattern, let fallbackPattern else {
+            return []
+        }
         var parsed: [CitationEntry] = []
         let range = NSRange(value.startIndex..<value.endIndex, in: value)
         let matches = citationPattern.matches(in: value, options: [], range: range)
@@ -457,6 +582,9 @@ struct CitationSearchQuery {
     }
 
     private static func containsEtAl(in value: String) -> Bool {
+        guard let etAlPattern else {
+            return value.localizedCaseInsensitiveContains("et al")
+        }
         let range = NSRange(value.startIndex..<value.endIndex, in: value)
         return etAlPattern.firstMatch(in: value, options: [], range: range) != nil
     }
@@ -474,7 +602,7 @@ struct CitationSearchQuery {
     private static func extractedYear(from value: String) -> String? {
         let range = NSRange(value.startIndex..<value.endIndex, in: value)
         guard
-            let match = Self.yearPattern.firstMatch(in: value, options: [], range: range),
+            let match = Self.yearPattern?.firstMatch(in: value, options: [], range: range),
             let yearRange = Range(match.range(at: 1), in: value)
         else {
             return nil

@@ -6,8 +6,10 @@ final class QuickLookPreviewManager: NSObject, @preconcurrency QLPreviewPanelDat
     static let shared = QuickLookPreviewManager()
 
     private var previewURL: URL?
+    private var lastToggleTime: TimeInterval = 0
 
     func togglePreview(url: URL) {
+        guard shouldAcceptToggle() else { return }
         if isPreviewing(url: url) {
             closePreview()
         } else {
@@ -16,17 +18,23 @@ final class QuickLookPreviewManager: NSObject, @preconcurrency QLPreviewPanelDat
     }
 
     func preview(url: URL) {
-        previewURL = url
         guard let panel = QLPreviewPanel.shared() else { return }
+        let standardizedURL = url.standardizedFileURL
+        let isSameItem = previewURL?.standardizedFileURL == standardizedURL
+        previewURL = url
         panel.dataSource = self
-        panel.reloadData()
-        panel.makeKeyAndOrderFront(nil)
+        if !panel.isVisible || !isSameItem {
+            panel.reloadData()
+            panel.currentPreviewItemIndex = 0
+        }
+        panel.orderFront(nil)
     }
 
     func closePreview() {
         guard QLPreviewPanel.sharedPreviewPanelExists(),
               let panel = QLPreviewPanel.shared() else { return }
         panel.orderOut(nil)
+        previewURL = nil
     }
 
     func isPreviewing(url: URL) -> Bool {
@@ -45,5 +53,11 @@ final class QuickLookPreviewManager: NSObject, @preconcurrency QLPreviewPanelDat
 
     func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
         previewURL as NSURL?
+    }
+
+    private func shouldAcceptToggle() -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        defer { lastToggleTime = now }
+        return now - lastToggleTime > 0.12
     }
 }

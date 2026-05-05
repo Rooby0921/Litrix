@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Litrix",
+    defaultLocalization: "en",
     platforms: [
         .macOS("14.4")
     ],
@@ -15,7 +16,11 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "PaperDockApp",
-            path: "Sources/PaperDockApp"
+            path: "Sources/PaperDockApp",
+            resources: [
+                .process("Resources/zh-Hans.lproj"),
+                .copy("Resources/Plugins")
+            ]
         )
     ]
 )

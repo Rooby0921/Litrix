@@ -4,14 +4,14 @@ import SwiftUI
 @MainActor
 final class NoteEditorWindowManager {
     static let shared = NoteEditorWindowManager()
-    private static let windowFrameAutosaveName = "litrix.note.editor.window.frame"
 
     private var controllers: [UUID: NSWindowController] = [:]
-    private var closeObservers: [UUID: NSObjectProtocol] = [:]
+    private var windowObservers: [UUID: [NSObjectProtocol]] = [:]
+    private var keyMonitors: [UUID: Any] = [:]
 
     private init() {}
 
-    func present(for paperID: UUID, store: LibraryStore) {
+    func present(for paperID: UUID, store: LibraryStore, settings: SettingsStore) {
         guard let paper = store.paper(id: paperID) else { return }
 
         if let existing = controllers[paperID], let window = existing.window {
@@ -32,24 +32,55 @@ final class NoteEditorWindowManager {
         window.minSize = NSSize(width: 560, height: 360)
         window.styleMask.insert([.titled, .closable, .resizable, .miniaturizable])
         window.isReleasedWhenClosed = false
-        window.setFrameAutosaveName(Self.windowFrameAutosaveName)
-        if !window.setFrameUsingName(Self.windowFrameAutosaveName) {
+        if let savedFrame = settings.resolvedNoteEditorWindowFrame {
+            window.setFrame(savedFrame, display: false)
+        } else {
             window.setContentSize(NSSize(width: 920, height: 680))
         }
 
         let controller = NSWindowController(window: window)
         controllers[paperID] = controller
+        keyMonitors[paperID] = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak window] event in
+            let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            guard window?.isKeyWindow == true,
+                  event.keyCode == 1,
+                  modifiers == [.command] else {
+                return event
+            }
+            NotificationCenter.default.post(name: .litrixNoteEditorSaveRequested, object: paperID)
+            return nil
+        }
 
-        let observer = NotificationCenter.default.addObserver(
+        let center = NotificationCenter.default
+        let moveObserver = center.addObserver(
+            forName: NSWindow.didMoveNotification,
+            object: window,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                settings.recordNoteEditorWindowFrame(window.frame)
+            }
+        }
+        let resizeObserver = center.addObserver(
+            forName: NSWindow.didResizeNotification,
+            object: window,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                settings.recordNoteEditorWindowFrame(window.frame)
+            }
+        }
+        let closeObserver = center.addObserver(
             forName: NSWindow.willCloseNotification,
             object: window,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
+                settings.recordNoteEditorWindowFrame(window.frame)
                 self?.cleanup(for: paperID)
             }
         }
-        closeObservers[paperID] = observer
+        windowObservers[paperID] = [moveObserver, resizeObserver, closeObserver]
 
         controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
@@ -59,10 +90,20 @@ final class NoteEditorWindowManager {
     private func cleanup(for paperID: UUID) {
         controllers.removeValue(forKey: paperID)
 
-        if let observer = closeObservers.removeValue(forKey: paperID) {
-            NotificationCenter.default.removeObserver(observer)
+        if let observers = windowObservers.removeValue(forKey: paperID) {
+            for observer in observers {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+
+        if let monitor = keyMonitors.removeValue(forKey: paperID) {
+            NSEvent.removeMonitor(monitor)
         }
     }
+}
+
+private extension Notification.Name {
+    static let litrixNoteEditorSaveRequested = Notification.Name("LitrixNoteEditorSaveRequested")
 }
 
 private struct NoteEditorWindowView: View {
@@ -87,6 +128,13 @@ private struct NoteEditorWindowView: View {
             persistNow()
             pendingSaveTask?.cancel()
             pendingSaveTask = nil
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .litrixNoteEditorSaveRequested)) { notification in
+            guard let requestedID = notification.object as? UUID,
+                  requestedID == paperID else { return }
+            pendingSaveTask?.cancel()
+            pendingSaveTask = nil
+            persistNow()
         }
         .onChange(of: noteText) {
             guard didInitialize else { return }

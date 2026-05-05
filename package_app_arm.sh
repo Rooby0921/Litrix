@@ -95,6 +95,13 @@ cat <<EOF > "${APP_BUNDLE_PATH}/Contents/Info.plist"
     <string>${APP_NAME}</string>
     <key>CFBundleDisplayName</key>
     <string>${APP_NAME}</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>zh-Hans</string>
+    </array>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
@@ -112,6 +119,15 @@ EOF
 echo "4/5 拷贝可执行文件..."
 cp "${BINARY_PATH}" "${APP_BUNDLE_PATH}/Contents/MacOS/${APP_NAME}"
 chmod +x "${APP_BUNDLE_PATH}/Contents/MacOS/${APP_NAME}"
+
+shopt -s nullglob
+RESOURCE_BUNDLES=(.build/arm64-apple-macosx/release/*.bundle)
+if [ ${#RESOURCE_BUNDLES[@]} -gt 0 ]; then
+  for bundle in "${RESOURCE_BUNDLES[@]}"; do
+    cp -R "${bundle}" "${APP_BUNDLE_PATH}/Contents/Resources/"
+  done
+fi
+shopt -u nullglob
 
 if [ -f "${ICON_SOURCE}" ] && command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
   echo "   生成应用图标..."

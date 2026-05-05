@@ -40,7 +40,7 @@ private struct LitrixHTTPResponse {
         LitrixHTTPResponse(
             statusCode: statusCode,
             reasonPhrase: reasonPhrase(for: statusCode),
-            headers: headers,
+            headers: ["Content-Type": "application/json; charset=utf-8"].merging(headers) { _, rhs in rhs },
             body: Data()
         )
     }
@@ -68,7 +68,7 @@ private final class LitrixHTTPConnectionHandler: @unchecked Sendable {
     private let connection: NWConnection
     private let queue: DispatchQueue
     private let requestHandler: RequestHandler
-    private let maximumRequestSize = 1_048_576
+    private let maximumRequestSize = 80 * 1024 * 1024
     private var buffer = Data()
     private var hasProcessedRequest = false
 
@@ -228,12 +228,14 @@ final class LitrixMCPServerController: ObservableObject {
     private let settings: SettingsStore
     private let store: LibraryStore
     private let service: LitrixMCPToolService
+    private let webImportService: LitrixWebImportService
+    private let mcpSessionID = "litrix-local"
     private let listenerQueue = DispatchQueue(label: "Litrix.MCP.Listener", qos: .userInitiated)
     private let supportedProtocolVersions = [
-        "2025-11-05",
         "2025-06-18",
         "2025-03-26",
-        "2024-11-05"
+        "2024-11-05",
+        "2025-11-05"
     ]
     private var listener: NWListener?
     private var cancellables: Set<AnyCancellable> = []
@@ -243,6 +245,7 @@ final class LitrixMCPServerController: ObservableObject {
         self.settings = settings
         self.store = store
         self.service = LitrixMCPToolService(settings: settings, store: store)
+        self.webImportService = LitrixWebImportService(store: store)
         bindSettings()
         restartListener()
     }
@@ -309,7 +312,7 @@ final class LitrixMCPServerController: ObservableObject {
             }
             listener.stateUpdateHandler = { [weak self] state in
                 Task { @MainActor [weak self] in
-                    self?.handleListenerState(state, endpointDescription: endpointDescription)
+                    self?.handleListenerState(state, endpointDescription: endpointDescription, portValue: portValue)
                 }
             }
             listener.start(queue: listenerQueue)
@@ -322,13 +325,20 @@ final class LitrixMCPServerController: ObservableObject {
         }
     }
 
-    private func handleListenerState(_ state: NWListener.State, endpointDescription: String) {
+    private func handleListenerState(_ state: NWListener.State, endpointDescription: String, portValue: Int) {
         switch state {
         case .ready:
             runtimeListening = true
             runtimeStatusText = "Listening on \(endpointDescription)"
         case .failed(let error):
             runtimeListening = false
+            listener = nil
+            if settings.mcpEnabled,
+               (portValue == SettingsStore.legacyMCPServerPort || portValue == SettingsStore.officeAddinStaticServerPort) {
+                runtimeStatusText = "MCP port \(portValue) is unavailable; switching to \(SettingsStore.defaultMCPServerPort)."
+                settings.mcpServerPort = SettingsStore.defaultMCPServerPort
+                return
+            }
             runtimeStatusText = "MCP listener failed: \(error.localizedDescription)"
         case .cancelled:
             runtimeListening = false
@@ -350,15 +360,17 @@ final class LitrixMCPServerController: ObservableObject {
                     completion(.plainText(statusCode: 500, body: "MCP server unavailable"))
                     return
                 }
-                let response = self.processHTTPRequest(request, expectedPath: expectedPath)
+                let response = await self.processHTTPRequest(request, expectedPath: expectedPath)
                 completion(response)
             }
         }
         handler.start()
     }
 
-    private func processHTTPRequest(_ request: LitrixHTTPRequest, expectedPath: String) -> LitrixHTTPResponse {
-        guard request.path == expectedPath else {
+    private func processHTTPRequest(_ request: LitrixHTTPRequest, expectedPath: String) async -> LitrixHTTPResponse {
+        let webImportPath = normalizedChildPath(base: expectedPath, child: "web-import")
+        let webImportContextPath = normalizedChildPath(base: webImportPath, child: "context")
+        guard request.path == expectedPath || request.path == webImportPath || request.path == webImportContextPath else {
             return .plainText(statusCode: 404, body: "Not found")
         }
 
@@ -366,16 +378,50 @@ final class LitrixMCPServerController: ObservableObject {
             return .plainText(statusCode: 403, body: "Origin not allowed")
         }
 
-        switch request.method {
-        case "POST":
-            return processJSONRPCRequest(request)
-        case "GET":
-            return .plainText(statusCode: 405, body: "Use POST for MCP requests", headers: ["Allow": "POST"])
-        case "DELETE":
-            return .plainText(statusCode: 405, body: "DELETE not supported", headers: ["Allow": "POST"])
-        default:
-            return .plainText(statusCode: 405, body: "Unsupported method", headers: ["Allow": "POST"])
+        if request.method == "OPTIONS" {
+            return responseWithCORS(
+                .empty(
+                    statusCode: 204,
+                    headers: ["Allow": "GET, POST, OPTIONS"]
+                ),
+                originHeader: request.headers["origin"]
+            )
         }
+
+        let response: LitrixHTTPResponse
+        if request.path == webImportContextPath {
+            response = processWebImportContextRequest(request)
+        } else if request.path == webImportPath {
+            response = await processWebImportRequest(request)
+        } else {
+            switch request.method {
+            case "POST":
+                response = processJSONRPCRequest(request)
+            case "GET":
+                response = .json(
+                    statusCode: 200,
+                    object: [
+                        "endpoint": expectedPath,
+                        "protocol": "MCP (Model Context Protocol)",
+                        "transport": "Streamable HTTP",
+                        "version": supportedProtocolVersions.first ?? "2025-03-26",
+                        "description": "This endpoint accepts MCP protocol requests via POST.",
+                        "usage": [
+                            "method": "POST",
+                            "contentType": "application/json",
+                            "body": "MCP JSON-RPC 2.0 formatted requests"
+                        ],
+                        "status": "available"
+                    ]
+                )
+            case "DELETE":
+                response = .plainText(statusCode: 405, body: "DELETE not supported", headers: ["Allow": "POST, OPTIONS"])
+            default:
+                response = .plainText(statusCode: 405, body: "Unsupported method", headers: ["Allow": "POST, OPTIONS"])
+            }
+        }
+
+        return responseWithCORS(response, originHeader: request.headers["origin"])
     }
 
     private func processJSONRPCRequest(_ request: LitrixHTTPRequest) -> LitrixHTTPResponse {
@@ -396,9 +442,62 @@ final class LitrixMCPServerController: ObservableObject {
         }
 
         if responseObject is NSNull {
-            return .empty(statusCode: 202)
+            return .empty(
+                statusCode: 202,
+                headers: ["Content-Type": "application/json; charset=utf-8"]
+            )
         }
         return .json(statusCode: 200, object: responseObject)
+    }
+
+    private func processWebImportRequest(_ request: LitrixHTTPRequest) async -> LitrixHTTPResponse {
+        guard request.method == "POST" else {
+            return .plainText(
+                statusCode: 405,
+                body: "Web import only supports POST",
+                headers: ["Allow": "POST, OPTIONS"]
+            )
+        }
+
+        let contentType = request.headers["content-type"]?.lowercased() ?? "application/json"
+        guard contentType.contains("application/json") else {
+            return .plainText(statusCode: 415, body: "Web import requests must use application/json")
+        }
+
+        do {
+            let payload = try await webImportService.importFromJSONData(request.body)
+            return .json(statusCode: 200, object: payload)
+        } catch let error as LitrixWebImportError {
+            return .plainText(statusCode: error.statusCode, body: error.localizedDescription)
+        } catch {
+            return .plainText(statusCode: 500, body: "Web import failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func processWebImportContextRequest(_ request: LitrixHTTPRequest) -> LitrixHTTPResponse {
+        guard request.method == "GET" else {
+            return .plainText(
+                statusCode: 405,
+                body: "Web import context only supports GET",
+                headers: ["Allow": "GET, OPTIONS"]
+            )
+        }
+
+        let tags = store.tags.map { tag -> [String: Any] in
+            var item: [String: Any] = ["name": tag]
+            if let color = store.tagColorHexes[tag] {
+                item["color"] = color
+            }
+            return item
+        }
+
+        return .json(
+            statusCode: 200,
+            object: [
+                "collections": store.collections,
+                "tags": tags
+            ]
+        )
     }
 
     private func handleJSONRPCPayload(_ payload: [String: Any]) -> Any {
@@ -482,7 +581,14 @@ final class LitrixMCPServerController: ObservableObject {
         guard let originHeader, !originHeader.isEmpty else {
             return true
         }
-        guard let originURL = URL(string: originHeader), let host = originURL.host?.lowercased() else {
+        guard let originURL = URL(string: originHeader) else {
+            return false
+        }
+        let scheme = originURL.scheme?.lowercased() ?? ""
+        if ["chrome-extension", "moz-extension", "safari-web-extension"].contains(scheme) {
+            return true
+        }
+        guard let host = originURL.host?.lowercased() else {
             return false
         }
         let allowedHosts = Set([
@@ -491,6 +597,36 @@ final class LitrixMCPServerController: ObservableObject {
             settings.resolvedMCPServerHost.lowercased()
         ])
         return allowedHosts.contains(host)
+    }
+
+    private func responseWithCORS(_ response: LitrixHTTPResponse, originHeader: String?) -> LitrixHTTPResponse {
+        var headers = response.headers
+        headers["Mcp-Session-Id"] = mcpSessionID
+        for (key, value) in corsHeaders(originHeader: originHeader) {
+            headers[key] = value
+        }
+        return LitrixHTTPResponse(
+            statusCode: response.statusCode,
+            reasonPhrase: response.reasonPhrase,
+            headers: headers,
+            body: response.body
+        )
+    }
+
+    private func corsHeaders(originHeader: String?) -> [String: String] {
+        let allowOrigin = (originHeader?.isEmpty == false ? originHeader : nil) ?? "*"
+        return [
+            "Access-Control-Allow-Origin": allowOrigin,
+            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Litrix-Source, Mcp-Session-Id",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Max-Age": "86400",
+            "Vary": "Origin"
+        ]
+    }
+
+    private func normalizedChildPath(base: String, child: String) -> String {
+        let trimmedBase = base == "/" ? "" : base.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return "/\(trimmedBase.isEmpty ? child : "\(trimmedBase)/\(child)")"
     }
 
     private func jsonRPCResultObject(id: Any?, result: [String: Any]) -> [String: Any] {

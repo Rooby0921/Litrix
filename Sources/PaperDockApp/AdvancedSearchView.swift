@@ -15,6 +15,7 @@ struct AdvancedSearchView: View {
     @State private var pendingSearchTask: Task<Void, Never>?
     @State private var localKeyMonitor: Any?
     @State private var activeQuickLookURL: URL?
+    @State private var lastSpacePreviewToggleTime: TimeInterval = 0
 
     private static let addedTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -26,18 +27,18 @@ struct AdvancedSearchView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Advanced Search")
+                Text(localized(chinese: "高级搜索", english: "Advanced Search"))
                     .font(.largeTitle.weight(.bold))
                 Spacer()
 
-                Button("Close") {
+                Button(localized(chinese: "关闭", english: "Close")) {
                     isPresented = false
                 }
                 .keyboardShortcut(.cancelAction)
             }
 
             HStack(spacing: 12) {
-                Text("Search in:")
+                Text(localized(chinese: "搜索范围：", english: "Search in:"))
                 Picker("", selection: $state.scope) {
                     ForEach(scopeOptions, id: \.selection) { option in
                         Text(option.label).tag(option.selection)
@@ -48,16 +49,16 @@ struct AdvancedSearchView: View {
             }
 
             HStack(spacing: 10) {
-                Text("Match")
+                Text(localized(chinese: "匹配", english: "Match"))
                 Picker("", selection: $state.matchMode) {
                     ForEach(AdvancedSearchMatchMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+                        Text(mode.title(for: settings.appLanguage)).tag(mode)
                     }
                 }
                 .pickerStyle(.menu)
                 .frame(width: 110)
 
-                Text("Conditions:")
+                Text(localized(chinese: "条件：", english: "Conditions:"))
             }
 
             VStack(spacing: 12) {
@@ -65,7 +66,7 @@ struct AdvancedSearchView: View {
                     HStack(spacing: 12) {
                         Picker("", selection: $condition.field) {
                             ForEach(AdvancedSearchField.allCases) { field in
-                                Text(field.title).tag(field)
+                                Text(field.title(for: settings.appLanguage)).tag(field)
                             }
                         }
                         .pickerStyle(.menu)
@@ -73,13 +74,13 @@ struct AdvancedSearchView: View {
 
                         Picker("", selection: $condition.operator) {
                             ForEach(AdvancedSearchOperator.allCases) { `operator` in
-                                Text(`operator`.title).tag(`operator`)
+                                Text(`operator`.title(for: settings.appLanguage)).tag(`operator`)
                             }
                         }
                         .pickerStyle(.menu)
                         .frame(width: 170)
 
-                        TextField("Enter search value", text: $condition.value)
+                        TextField(localized(chinese: "输入搜索值", english: "Enter search value"), text: $condition.value)
                             .textFieldStyle(.roundedBorder)
 
                         Button {
@@ -100,19 +101,19 @@ struct AdvancedSearchView: View {
             }
 
             HStack(spacing: 12) {
-                Button("Search") {
+                Button(localized(chinese: "搜索", english: "Search")) {
                     scheduleRunSearch()
                 }
                 .keyboardShortcut(.defaultAction)
 
-                Button("Clear") {
+                Button(localized(chinese: "清空", english: "Clear")) {
                     let preservedScope = state.scope
                     state = AdvancedSearchState()
                     state.scope = preservedScope
                     applySearchResults([])
                 }
 
-                Button("Save Results to Collection") {
+                Button(localized(chinese: "保存结果为分类", english: "Save Results to Collection")) {
                     saveResultsAsCollection()
                 }
                 .disabled(results.isEmpty)
@@ -161,7 +162,7 @@ struct AdvancedSearchView: View {
     @TableColumnBuilder<Paper, Never>
     private var resultTableColumns: some TableColumnContent<Paper, Never> {
         TableColumnForEach(visiblePaperTableColumns, id: \.self) { column in
-            TableColumn(column.displayName) { paper in
+            TableColumn(column.displayName(for: settings.appLanguage)) { paper in
                 resultCell(for: paper, column: column)
             }
             .width(min: 0, ideal: settings.paperTableColumnWidth(for: column), max: nil)
@@ -223,17 +224,42 @@ struct AdvancedSearchView: View {
             Text("—")
                 .foregroundStyle(.secondary)
         } else {
-            HStack(spacing: 5) {
-                ForEach(Array(paper.tags.prefix(6)), id: \.self) { tag in
-                    Circle()
-                        .fill(tagColor(for: tag) ?? Color.secondary.opacity(0.35))
-                        .frame(width: 7, height: 7)
+            switch settings.tagColumnDisplayMode {
+            case .color:
+                HStack(spacing: 5) {
+                    ForEach(Array(paper.tags.prefix(6)), id: \.self) { tag in
+                        Circle()
+                            .fill(tagColor(for: tag) ?? Color.secondary.opacity(0.35))
+                            .frame(width: 7, height: 7)
+                    }
+                    if paper.tags.count > 6 {
+                        Text("+\(paper.tags.count - 6)")
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                if paper.tags.count > 6 {
-                    Text("+\(paper.tags.count - 6)")
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
+            case .text:
+                HStack(spacing: 5) {
+                    ForEach(Array(paper.tags.prefix(4)), id: \.self) { tag in
+                        let color = tagColor(for: tag) ?? Color.secondary
+                        Text(tag)
+                            .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(color)
+                            .lineLimit(1)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(color.opacity(0.20))
+                            )
+                    }
+                    if paper.tags.count > 4 {
+                        Text("+\(paper.tags.count - 4)")
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
                 }
+                .clipped()
             }
         }
     }
@@ -285,6 +311,10 @@ struct AdvancedSearchView: View {
             return store.hasExistingPDFAttachment(for: paper) ? "Attached" : "Missing"
         case .note:
             return paper.notes
+        case .abstractText:
+            return paper.abstractText
+        case .chineseAbstract:
+            return paper.chineseAbstract
         case .rqs:
             return paper.rqs
         case .conclusion:
@@ -317,6 +347,8 @@ struct AdvancedSearchView: View {
             return paper.keywords
         case .limitations:
             return paper.limitations
+        case .webPageURL:
+            return paper.webPageURL
         }
     }
 
@@ -350,7 +382,7 @@ struct AdvancedSearchView: View {
         var options: [AdvancedSearchScopeOption] = SystemLibrary.allCases.map { library in
             AdvancedSearchScopeOption(
                 selection: .library(library),
-                label: "Library: \(library.englishTitle)"
+                label: "\(localized(chinese: "文库", english: "Library")): \(library.title(for: settings.appLanguage))"
             )
         }
 
@@ -358,7 +390,7 @@ struct AdvancedSearchView: View {
             contentsOf: store.collections.map { collection in
                 AdvancedSearchScopeOption(
                     selection: .collection(collection),
-                    label: "Collection: \(collection)"
+                    label: "\(localized(chinese: "分类", english: "Collection")): \(collection)"
                 )
             }
         )
@@ -367,7 +399,7 @@ struct AdvancedSearchView: View {
             contentsOf: store.tags.map { tag in
                 AdvancedSearchScopeOption(
                     selection: .tag(tag),
-                    label: "Tag: \(tag)"
+                    label: "\(localized(chinese: "标签", english: "Tag")): \(tag)"
                 )
             }
         )
@@ -475,7 +507,7 @@ struct AdvancedSearchView: View {
 
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
-            if event.keyCode == 49, modifiers.isEmpty {
+            if event.keyCode == 49, modifiers.isEmpty, !event.isARepeat {
                 if isTextInputFocused {
                     return event
                 }
@@ -502,6 +534,10 @@ struct AdvancedSearchView: View {
     }
 
     private func toggleSpacePreview() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastSpacePreviewToggleTime > 0.12 else { return }
+        lastSpacePreviewToggleTime = now
+
         if let activeQuickLookURL, QuickLookPreviewManager.shared.isPreviewing(url: activeQuickLookURL) {
             QuickLookPreviewManager.shared.closePreview()
             self.activeQuickLookURL = nil
@@ -522,6 +558,10 @@ struct AdvancedSearchView: View {
         }
         return results.first
     }
+
+    private func localized(chinese: String, english: String) -> String {
+        settings.appLanguage == .english ? english : chinese
+    }
 }
 
 private struct AdvancedSearchScopeOption: Hashable {
@@ -530,6 +570,11 @@ private struct AdvancedSearchScopeOption: Hashable {
 }
 
 private extension SystemLibrary {
+    func title(for language: AppLanguage) -> String {
+        guard language == .english else { return title }
+        return englishTitle
+    }
+
     var englishTitle: String {
         switch self {
         case .all:
@@ -544,6 +589,8 @@ private extension SystemLibrary {
             return "Missing DOI"
         case .missingAttachment:
             return "Missing Attachment"
+        case .recentlyDeleted:
+            return "Recently Deleted"
         }
     }
 }

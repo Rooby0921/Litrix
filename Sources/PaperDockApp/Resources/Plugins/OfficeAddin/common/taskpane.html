@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Litrix 引用</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <link rel="stylesheet" href="taskpane.css">
+</head>
+<body>
+  <main>
+    <h1>Litrix 引用</h1>
+
+    <label for="endpoint">Litrix MCP 地址</label>
+    <input id="endpoint" type="text" value="http://127.0.0.1:23122/mcp">
+
+    <section class="grid">
+      <label for="style">引文格式</label>
+      <select id="style">
+        <option value="apa7">APA-7</option>
+        <option value="gbt7714">GB/T 7714</option>
+        <option value="mla9">MLA-9</option>
+        <option value="chicago">Chicago Author-Date</option>
+      </select>
+
+      <label for="type">引用格式</label>
+      <select id="type">
+        <option value="footnote">自动脚注</option>
+        <option value="endnote">自动尾注</option>
+        <option value="inline">文内引用</option>
+      </select>
+    </section>
+
+    <label for="query">搜索 Litrix 文库</label>
+    <div class="searchRow">
+      <input id="query" type="text" placeholder="标题、作者、关键词或 DOI">
+      <button id="searchButton">搜索</button>
+    </div>
+
+    <div id="results" class="results" aria-live="polite"></div>
+
+    <div class="actions">
+      <button id="insertButton" disabled>插入引用</button>
+      <button id="copyButton" disabled>复制引用</button>
+    </div>
+
+    <p id="status"></p>
+  </main>
+  <script src="taskpane.js"></script>
+</body>
+</html>

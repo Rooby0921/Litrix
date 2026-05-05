@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UniformTypeIdentifiers
 
 enum BibTeXExporter {
     static func exportText(for paper: Paper, fields: BibTeXExportFieldOptions = BibTeXExportFieldOptions()) -> String {
@@ -22,6 +23,7 @@ enum BibTeXExporter {
         if fields.doi {
             appendField("doi", paper.doi, to: &entries)
         }
+        appendField("url", paper.webPageURL, to: &entries)
         if fields.abstract {
             appendField("abstract", paper.abstractText, to: &entries)
         }
@@ -45,7 +47,9 @@ enum BibTeXExporter {
     @MainActor
     static func save(_ text: String, suggestedFileName: String) {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "bib")!]
+        if let bibType = UTType(filenameExtension: "bib") {
+            panel.allowedContentTypes = [bibType]
+        }
         panel.nameFieldStringValue = suggestedFileName
 
         guard panel.runModal() == .OK, let url = panel.url else {

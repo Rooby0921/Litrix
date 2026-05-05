@@ -1,0 +1,116 @@
+body {
+  margin: 0;
+  font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #1d1d1f;
+  background: #fbfbfd;
+}
+
+main {
+  padding: 16px;
+}
+
+h1 {
+  margin: 0 0 14px;
+  font-size: 18px;
+}
+
+label {
+  display: block;
+  margin: 10px 0 4px;
+  color: #565a5f;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+input,
+select {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  padding: 5px 8px;
+  font: inherit;
+}
+
+button {
+  min-height: 30px;
+  border: 1px solid #1f7a57;
+  border-radius: 6px;
+  background: #24845f;
+  color: #fff;
+  padding: 5px 10px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 10px;
+}
+
+.searchRow,
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.searchRow input {
+  flex: 1;
+}
+
+.results {
+  margin-top: 12px;
+  border: 1px solid #d8dde3;
+  border-radius: 6px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.result {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid #e5e7eb;
+  border-radius: 0;
+  background: #fff;
+  color: #1d1d1f;
+  text-align: left;
+  padding: 8px;
+}
+
+.result:last-child {
+  border-bottom: 0;
+}
+
+.result.selected {
+  background: #e6f3ed;
+}
+
+.title {
+  font-weight: 700;
+}
+
+.meta {
+  margin-top: 3px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.actions {
+  margin-top: 12px;
+}
+
+#status {
+  min-height: 18px;
+  color: #565a5f;
+  font-size: 12px;
+}

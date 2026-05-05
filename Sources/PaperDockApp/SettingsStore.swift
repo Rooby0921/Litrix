@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Security
 
 enum CitationPreset: String, CaseIterable, Codable, Identifiable {
     case apa7 = "apa-7"
@@ -140,7 +141,7 @@ enum MCPClientType: String, CaseIterable, Codable, Identifiable {
         case .geminiCLI: return "Gemini CLI"
         case .chatbox: return "Chatbox"
         case .traeAI: return "Trae AI"
-        case .qwenCode: return "Qwen Code"
+        case .qwenCode: return "Qwen Desktop / Qwen Code"
         case .customHTTP: return "自定义 HTTP 客户端"
         }
     }
@@ -157,7 +158,7 @@ enum MCPClientType: String, CaseIterable, Codable, Identifiable {
         case .geminiCLI: return "Gemini CLI MCP 配置指南"
         case .chatbox: return "Chatbox MCP 配置指南"
         case .traeAI: return "Trae AI MCP 配置指南"
-        case .qwenCode: return "Qwen Code MCP 配置指南"
+        case .qwenCode: return "Qwen Desktop / Qwen Code MCP 配置指南"
         case .customHTTP: return "自定义 HTTP MCP 配置指南"
         }
     }
@@ -249,6 +250,22 @@ enum AppLanguage: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+enum TagColumnDisplayMode: String, CaseIterable, Codable, Identifiable {
+    case color
+    case text
+
+    var id: String { rawValue }
+
+    func title(for language: AppLanguage) -> String {
+        switch (self, language) {
+        case (.color, .english): return "Color"
+        case (.text, .english): return "Text"
+        case (.color, _): return "色彩"
+        case (.text, _): return "文字"
+        }
+    }
+}
+
 enum ZombiePaperThreshold: String, CaseIterable, Codable, Identifiable {
     case threeDays
     case oneWeek
@@ -333,6 +350,24 @@ enum ZombiePaperThreshold: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+/// Controls whether metadata import prefers local parsing (file name + local files)
+/// or remote API lookups. Added to give users control over API usage vs. speed.
+enum MetadataRefreshPriority: String, CaseIterable, Codable, Identifiable {
+    case localFirst
+    case apiFirst
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .localFirst:
+            return "优先本地识别"
+        case .apiFirst:
+            return "优先API识别"
+        }
+    }
+}
+
 struct PaperTableColumnVisibility: Codable, Equatable {
     var title = true
     var englishTitle = false
@@ -347,6 +382,8 @@ struct PaperTableColumnVisibility: Codable, Equatable {
     var image = true
     var attachmentStatus = false
     var note = true
+    var abstractText = true
+    var chineseAbstract = true
     var rqs = false
     var conclusion = false
     var results = false
@@ -363,6 +400,7 @@ struct PaperTableColumnVisibility: Codable, Equatable {
     var country = false
     var keywords = false
     var limitations = false
+    var webPageURL = false
 
     private enum CodingKeys: String, CodingKey {
         case title
@@ -378,6 +416,8 @@ struct PaperTableColumnVisibility: Codable, Equatable {
         case image
         case attachmentStatus
         case note
+        case abstractText
+        case chineseAbstract
         case rqs
         case conclusion
         case results
@@ -394,6 +434,7 @@ struct PaperTableColumnVisibility: Codable, Equatable {
         case country
         case keywords
         case limitations
+        case webPageURL
     }
 
     init() {}
@@ -413,6 +454,8 @@ struct PaperTableColumnVisibility: Codable, Equatable {
         image = try container.decodeIfPresent(Bool.self, forKey: .image) ?? true
         attachmentStatus = try container.decodeIfPresent(Bool.self, forKey: .attachmentStatus) ?? false
         note = try container.decodeIfPresent(Bool.self, forKey: .note) ?? true
+        abstractText = try container.decodeIfPresent(Bool.self, forKey: .abstractText) ?? true
+        chineseAbstract = try container.decodeIfPresent(Bool.self, forKey: .chineseAbstract) ?? true
         rqs = try container.decodeIfPresent(Bool.self, forKey: .rqs) ?? false
         conclusion = try container.decodeIfPresent(Bool.self, forKey: .conclusion) ?? false
         results = try container.decodeIfPresent(Bool.self, forKey: .results) ?? false
@@ -429,6 +472,7 @@ struct PaperTableColumnVisibility: Codable, Equatable {
         country = try container.decodeIfPresent(Bool.self, forKey: .country) ?? false
         keywords = try container.decodeIfPresent(Bool.self, forKey: .keywords) ?? false
         limitations = try container.decodeIfPresent(Bool.self, forKey: .limitations) ?? false
+        webPageURL = try container.decodeIfPresent(Bool.self, forKey: .webPageURL) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -446,6 +490,8 @@ struct PaperTableColumnVisibility: Codable, Equatable {
         try container.encode(image, forKey: .image)
         try container.encode(attachmentStatus, forKey: .attachmentStatus)
         try container.encode(note, forKey: .note)
+        try container.encode(abstractText, forKey: .abstractText)
+        try container.encode(chineseAbstract, forKey: .chineseAbstract)
         try container.encode(rqs, forKey: .rqs)
         try container.encode(conclusion, forKey: .conclusion)
         try container.encode(results, forKey: .results)
@@ -462,6 +508,7 @@ struct PaperTableColumnVisibility: Codable, Equatable {
         try container.encode(country, forKey: .country)
         try container.encode(keywords, forKey: .keywords)
         try container.encode(limitations, forKey: .limitations)
+        try container.encode(webPageURL, forKey: .webPageURL)
     }
 
     subscript(column: PaperTableColumn) -> Bool {
@@ -492,6 +539,8 @@ enum PaperTableColumn: String, CaseIterable, Codable, Identifiable, Hashable {
     case image
     case attachmentStatus
     case note
+    case abstractText
+    case chineseAbstract
     case rqs
     case conclusion
     case results
@@ -508,6 +557,7 @@ enum PaperTableColumn: String, CaseIterable, Codable, Identifiable, Hashable {
     case country
     case keywords
     case limitations
+    case webPageURL
 
     var id: String { rawValue }
 
@@ -526,6 +576,8 @@ enum PaperTableColumn: String, CaseIterable, Codable, Identifiable, Hashable {
         case .image: return "Image"
         case .attachmentStatus: return "Attachment"
         case .note: return "Note"
+        case .abstractText: return "Abstract"
+        case .chineseAbstract: return "Chinese Abstract"
         case .rqs: return "RQs"
         case .conclusion: return "Conclusion"
         case .results: return "Results"
@@ -542,6 +594,46 @@ enum PaperTableColumn: String, CaseIterable, Codable, Identifiable, Hashable {
         case .country: return "Country"
         case .keywords: return "Keywords"
         case .limitations: return "Limitations"
+        case .webPageURL: return "Web Link"
+        }
+    }
+
+    func displayName(for language: AppLanguage) -> String {
+        guard language == .chinese else { return displayName }
+
+        switch self {
+        case .title: return "标题"
+        case .englishTitle: return "英文标题"
+        case .authors: return "作者"
+        case .authorsEnglish: return "英文作者"
+        case .year: return "年份"
+        case .source: return "来源"
+        case .addedTime: return "添加时间"
+        case .editedTime: return "编辑时间"
+        case .tags: return "标签"
+        case .rating: return "评分"
+        case .image: return "图片"
+        case .attachmentStatus: return "附件"
+        case .note: return "笔记"
+        case .abstractText: return "摘要"
+        case .chineseAbstract: return "中文摘要"
+        case .rqs: return "研究问题"
+        case .conclusion: return "结论"
+        case .results: return "结果"
+        case .category: return "类别"
+        case .impactFactor: return "影响因子"
+        case .samples: return "样本"
+        case .participantType: return "参与者类型"
+        case .variables: return "变量"
+        case .dataCollection: return "数据收集"
+        case .dataAnalysis: return "数据分析"
+        case .methodology: return "方法"
+        case .theoreticalFoundation: return "理论基础"
+        case .educationalLevel: return "教育阶段"
+        case .country: return "国家"
+        case .keywords: return "关键词"
+        case .limitations: return "局限"
+        case .webPageURL: return "网页链接"
         }
     }
 
@@ -564,6 +656,8 @@ enum PaperTableColumn: String, CaseIterable, Codable, Identifiable, Hashable {
         case .image: return 220
         case .attachmentStatus: return 128
         case .note: return 180
+        case .abstractText: return 320
+        case .chineseAbstract: return 320
         case .rqs: return 260
         case .conclusion: return 260
         case .results: return 260
@@ -580,6 +674,7 @@ enum PaperTableColumn: String, CaseIterable, Codable, Identifiable, Hashable {
         case .country: return 160
         case .keywords: return 320
         case .limitations: return 320
+        case .webPageURL: return 260
         }
     }
 
@@ -598,6 +693,8 @@ enum PaperTableColumn: String, CaseIterable, Codable, Identifiable, Hashable {
         case .image: return \.image
         case .attachmentStatus: return \.attachmentStatus
         case .note: return \.note
+        case .abstractText: return \.abstractText
+        case .chineseAbstract: return \.chineseAbstract
         case .rqs: return \.rqs
         case .conclusion: return \.conclusion
         case .results: return \.results
@@ -614,17 +711,20 @@ enum PaperTableColumn: String, CaseIterable, Codable, Identifiable, Hashable {
         case .country: return \.country
         case .keywords: return \.keywords
         case .limitations: return \.limitations
+        case .webPageURL: return \.webPageURL
         }
     }
 
     static var defaultOrder: [PaperTableColumn] {
-        allCases
+        allCases.filter { $0 != .englishTitle }
     }
 
     static func fromTableHeaderTitle(_ title: String) -> PaperTableColumn? {
         let normalized = normalizedColumnToken(title)
         return allCases.first {
             normalizedColumnToken($0.tableHeaderTitle) == normalized
+                || normalizedColumnToken($0.displayName(for: .chinese)) == normalized
+                || normalizedColumnToken($0.displayName(for: .english)) == normalized
                 || normalizedColumnToken($0.rawValue) == normalized
         }
     }
@@ -694,6 +794,35 @@ enum InspectorMetadataField: String, CaseIterable, Codable, Identifiable {
         }
     }
 
+    func displayName(for language: AppLanguage) -> String {
+        guard language == .chinese else { return displayName }
+        switch self {
+        case .year: return "年份"
+        case .source: return "来源"
+        case .doi: return "DOI"
+        case .volume: return "卷"
+        case .issue: return "期"
+        case .pages: return "页码"
+        case .paperType: return "文献类型"
+        case .rqs: return "研究问题"
+        case .conclusion: return "结论"
+        case .results: return "结果"
+        case .category: return "类别"
+        case .impactFactor: return "影响因子"
+        case .samples: return "样本"
+        case .participantType: return "参与者类型"
+        case .variables: return "变量"
+        case .dataCollection: return "数据收集"
+        case .dataAnalysis: return "数据分析"
+        case .methodology: return "方法"
+        case .theoreticalFoundation: return "理论基础"
+        case .educationalLevel: return "教育阶段"
+        case .country: return "国家"
+        case .keywords: return "关键词"
+        case .limitations: return "局限"
+        }
+    }
+
     var placeholder: String {
         switch self {
         case .year:
@@ -709,8 +838,43 @@ enum InspectorMetadataField: String, CaseIterable, Codable, Identifiable {
         }
     }
 
+    func placeholder(for language: AppLanguage) -> String {
+        guard language == .chinese else { return placeholder }
+        switch self {
+        case .year:
+            return "未设置"
+        case .source:
+            return "添加期刊或会议"
+        case .doi:
+            return "添加 DOI"
+        case .volume, .issue, .pages, .paperType, .category, .impactFactor, .samples, .participantType,
+             .variables, .dataCollection, .dataAnalysis, .methodology, .theoreticalFoundation,
+             .educationalLevel, .country, .keywords, .limitations, .rqs, .conclusion, .results:
+            return "添加\(displayName(for: language))"
+        }
+    }
+
     static var defaultOrder: [InspectorMetadataField] {
         allCases
+    }
+}
+
+enum AbstractDisplayLanguage: String, CaseIterable, Codable, Identifiable {
+    case original
+    case chinese
+    case english
+
+    var id: String { rawValue }
+
+    func title(for language: AppLanguage) -> String {
+        switch (self, language) {
+        case (.original, .english): return "Original"
+        case (.chinese, .english): return "Chinese"
+        case (.english, .english): return "English"
+        case (.original, _): return "原文"
+        case (.chinese, _): return "中文"
+        case (.english, _): return "英文"
+        }
     }
 }
 
@@ -723,6 +887,7 @@ struct AppSettingsSnapshot: Codable {
     var pdf2zhEnvironmentKind: PDF2ZHEnvironmentKind?
     var pdf2zhEnvironmentName: String?
     var pdf2zhCustomActivationCommand: String?
+    var pdf2zhMaxConcurrentTasks: Int?
     var metadataPromptTemplate: String?
     var papersStorageDirectoryPath: String?
     var papersStorageBookmarkData: Data?
@@ -735,6 +900,7 @@ struct AppSettingsSnapshot: Codable {
     var tableRowHeightMultiplier: Double?
     var recentReadingRange: RecentReadingRange?
     var zombiePapersThreshold: ZombiePaperThreshold?
+    var recentlyDeletedRetentionDays: Int?
     var appLanguage: AppLanguage?
     var mcpEnabled: Bool?
     var mcpServerName: String?
@@ -748,20 +914,90 @@ struct AppSettingsSnapshot: Codable {
     var mcpSearchResultLimit: Int?
     var mcpMaxNumericValues: Int?
     var autoRenameImportedPDFFiles: Bool?
+    var preferTranslatedPDF: Bool?
     var imageThumbnailMaxSizeMultiplier: Double?
     var paperTableColumnVisibility: PaperTableColumnVisibility?
     var paperTableColumnOrder: [PaperTableColumn]?
     var paperTableColumnWidths: [String: Double]?
+    var paperTimestampDateFormat: String?
+    var tagColumnDisplayMode: TagColumnDisplayMode?
+    var abstractDisplayLanguage: AbstractDisplayLanguage?
+    var titleDisplayLanguage: AbstractDisplayLanguage?
+    var easyScholarAPIKey: String?
+    var easyScholarFields: String?
+    var easyScholarAbbreviations: String?
+    var easyScholarColorHexes: String?
     var inspectorMetadataOrder: [InspectorMetadataField]?
     var metadataCustomRefreshFields: [MetadataField]?
+    var metadataRefreshPriority: MetadataRefreshPriority?
     var tagQuickNumberMap: [String: Int]?
+    var alternatingRowColorHex: String?
+    var alternatingRowOpacity: Double?
+    var tableSelectionTextColorHex: String?
+    var starColorHex: String?
+    var sidebarGlassDesktopBlend: Double?
+    var sidebarGlassTintOpacity: Double?
+    var quickCitationEnabled: Bool?
+    var toolbarIconOnly: Bool?
     var mainWindowWidth: Double?
     var mainWindowHeight: Double?
+    var noteEditorWindowOriginX: Double?
+    var noteEditorWindowOriginY: Double?
+    var noteEditorWindowWidth: Double?
+    var noteEditorWindowHeight: Double?
 }
 
 private struct LegacySettingsSnapshot: Codable {
     var siliconFlowAPIKey: String
     var siliconFlowModel: String
+}
+
+private enum SettingsKeychain {
+    private static let service = "com.rooby.Litrix"
+
+    static func read(account: String) -> String? {
+        var query = baseQuery(account: account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess,
+              let data = item as? Data,
+              let value = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func save(_ value: String, account: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = baseQuery(account: account)
+        guard !trimmed.isEmpty else {
+            SecItemDelete(query as CFDictionary)
+            return
+        }
+
+        let data = Data(trimmed.utf8)
+        let updateStatus = SecItemUpdate(
+            query as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary
+        )
+        guard updateStatus == errSecItemNotFound else { return }
+
+        var addQuery = query
+        addQuery[kSecValueData as String] = data
+        SecItemAdd(addQuery as CFDictionary, nil)
+    }
+
+    private static func baseQuery(account: String) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+    }
 }
 
 @MainActor
@@ -771,9 +1007,14 @@ final class SettingsStore: ObservableObject {
     static let defaultModel = defaultAPIProvider.defaultModel
     static let defaultPDF2ZHEnvironmentKind: PDF2ZHEnvironmentKind = .conda
     static let defaultPDF2ZHEnvironmentName = "tools-dev"
-    static let defaultMCPServerName = "Litrix-mcp"
+    static let defaultPDF2ZHMaxConcurrentTasks = 2
+    static let defaultTableSelectionTextColorHex = "#FFFFFF"
+    static let defaultStarColorHex = "#FED72C"
+    static let defaultMCPServerName = "litrix-mcp"
     static let defaultMCPServerHost = "127.0.0.1"
-    static let defaultMCPServerPort = 23120
+    static let legacyMCPServerPort = 23120
+    static let officeAddinStaticServerPort = 23121
+    static let defaultMCPServerPort = 23122
     static let defaultMCPServerPath = "/mcp"
     static let defaultMCPMaxContentLength = 6_000
     static let defaultMCPMaxAttachments = 6
@@ -781,14 +1022,20 @@ final class SettingsStore: ObservableObject {
     static let defaultMCPKeywordLimit = 24
     static let defaultMCPSearchResultLimit = 30
     static let defaultMCPMaxNumericValues = 120
+    static let defaultRecentlyDeletedRetentionDays = 30
+    static let recentlyDeletedRetentionDayRange = 1...365
     static let defaultPapersDirectoryPath = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Litrix/Papers", isDirectory: true)
         .path
+    static let defaultEasyScholarFields = "cssci, sciif, sci, utd24, ajg, sciBase, ssci, pku, 复合影响因子"
+    static let defaultEasyScholarAbbreviations = "北大中文核心=核, SCIIF=, SCIIF(5)=IF(5), SCI基础版=中, SCI=S, SSCI=SS,CSSCI=CS,CSSCI扩展版=CS扩"
+    static let defaultEasyScholarColorHexes = ""
+    nonisolated static let defaultPaperTimestampDateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
     static let defaultMetadataPromptTemplate = """
-    你是文献元数据提取助手。你将收到“文件名”和“PDF 文本片段”。
+    你是文献元数据提取助手。你将收到“文件名”和“文献文本片段/已有条目信息”。
     你的任务是提取和总结元数据（优先提取），并且只输出一个 JSON 对象，不允许输出 Markdown、解释或代码块。
     JSON 键必须严格为（键名不可增删、不可改名）：
-    {"title":"","englishTitle":"","authors":"","authorsEnglish":"","year":"","source":"","doi":"","abstractText":"","volume":"","issue":"","pages":"","paperType":"","rqs":"","conclusion":"","results":"","category":"","impactFactor":"","samples":"","participantType":"","variables":"","dataCollection":"","dataAnalysis":"","methodology":"","theoreticalFoundation":"","educationalLevel":"","country":"","keywords":"","limitations":""}
+    {"title":"","englishTitle":"","authors":"","authorsEnglish":"","year":"","source":"","doi":"","abstractText":"","chineseAbstract":"","volume":"","issue":"","pages":"","paperType":"","rqs":"","conclusion":"","results":"","category":"","impactFactor":"","samples":"","participantType":"","variables":"","dataCollection":"","dataAnalysis":"","methodology":"","theoreticalFoundation":"","educationalLevel":"","country":"","keywords":"","limitations":""}
 
     规则：
     1. 只能基于输入内容提取；不确定时填空字符串。
@@ -796,7 +1043,8 @@ final class SettingsStore: ObservableObject {
     2.1 englishTitle：从文献中提取文献的英语标题，优先从原文提取，原文不存在时，翻译中文标题。
     2.2 authorsEnglish：从文献中提取文献的所有作者的英语姓名，用 ", " 分割，优先从原文提取，原文不存在时，翻译中文姓名。
     3. year 优先返回四位数字，不确定则留空。
-    4. keywords 用英文逗号分隔（例如 "teacher burnout, workload, wellbeing"）。
+    4. abstractText 保留原文摘要语言：原文是中文就中文，原文是英文就英文，不要为了 abstractText 翻译成英文。chineseAbstract 必须输出中文摘要；若原文摘要已是中文，可复用或整理为中文；若原文是英文，翻译/概述成中文。
+    4.1 keywords 用英文逗号分隔（例如 "teacher burnout, workload, wellbeing"）。
     5. IF包括JCR分区（中国期刊使用中文期刊等级，如北大核心，CSSCI），期刊分类（不同分类换行处理，如SCI，SSCI），期刊影响因子。该数据请你联网查询并整理。格式为：Q1, SCI, CSSCI, 17.3
     6. RQs即从原文摘取研究问题，并补充翻译。若原文无研究问题，从原文总结，在总结的问题后添加“🤖”表情包，表示是从原文总结的。格式如“1️⃣ 哪些因素导致教师对生成式人工智能产生依赖？What factors contribute to teachers' addiction to generative AI; 2️⃣ I-PACE模型在多大程度上能够解释教师对生成式人工智能的依赖？To what extent can the I-PACE model explain teachers' addiction to generative AI?🤖”
     7. Variables从原文提取，变量内部用“, ”隔开。英文变量名翻译成中文，但在括号内保留英语原文，下同。若文章包含干扰变量，调节变量，控制变量等，需以相同格式补充。示例如：
@@ -818,6 +1066,9 @@ final class SettingsStore: ObservableObject {
     22. paperType从原文总结，内容为文献类型，包括“期刊”“会议”“电子文献”等
     23. Limitations 从原文总结，用富含语意密度的句子准确清晰地分点概述，每点50字以内，可分多点。示例如：1️⃣采用横断面设计无法确立心理因素与生成式AI成瘾之间的因果关系，结构方程模型仅能揭示变量间的关联，难以判断影响方向。2️⃣...3️⃣...
     24. 输出必须是可被 JSON 解析器直接解析的合法 JSON。
+    25. 字段值中若需要引用英文短语，优先使用中文弯引号 “ ”；不要在字符串内部直接输出未转义的英文双引号。
+    26. 若必须保留英文双引号，必须写成 JSON 转义形式 \\\"；字段值中的换行必须写成 \\n，不要在字符串内部输出真实换行。
+    27. 所有字段必须输出纯文本；删除 HTML/XML 标签和上标标记，例如 <scp>Al</scp> 应输出为 Al。
     """
 
     @Published var metadataAPIProvider: MetadataAPIProvider {
@@ -829,7 +1080,10 @@ final class SettingsStore: ObservableObject {
     }
 
     @Published var metadataAPIKey: String {
-        didSet { save() }
+        didSet {
+            persistSecretToKeychain(metadataAPIKey, account: Self.metadataAPIKeychainAccount)
+            save()
+        }
     }
 
     @Published var metadataModel: String {
@@ -850,6 +1104,17 @@ final class SettingsStore: ObservableObject {
 
     @Published var pdf2zhCustomActivationCommand: String {
         didSet { save() }
+    }
+
+    @Published var pdf2zhMaxConcurrentTasks: Int {
+        didSet {
+            let normalized = Self.normalizedPDF2ZHMaxConcurrentTasks(pdf2zhMaxConcurrentTasks)
+            if pdf2zhMaxConcurrentTasks != normalized {
+                pdf2zhMaxConcurrentTasks = normalized
+                return
+            }
+            save()
+        }
     }
 
     @Published var metadataPromptTemplate: String {
@@ -892,7 +1157,22 @@ final class SettingsStore: ObservableObject {
         didSet { save() }
     }
 
+    @Published var recentlyDeletedRetentionDays: Int {
+        didSet {
+            let normalized = Self.normalizedRecentlyDeletedRetentionDays(recentlyDeletedRetentionDays)
+            if recentlyDeletedRetentionDays != normalized {
+                recentlyDeletedRetentionDays = normalized
+                return
+            }
+            save()
+        }
+    }
+
     @Published var appLanguage: AppLanguage {
+        didSet { save() }
+    }
+
+    @Published var toolbarIconOnly: Bool {
         didSet { save() }
     }
 
@@ -921,6 +1201,10 @@ final class SettingsStore: ObservableObject {
     }
 
     @Published var mcpMaxAttachments: Int {
+        didSet { save() }
+    }
+
+    @Published var preferTranslatedPDF: Bool {
         didSet { save() }
     }
 
@@ -960,6 +1244,41 @@ final class SettingsStore: ObservableObject {
         didSet { save() }
     }
 
+    @Published var paperTimestampDateFormat: String {
+        didSet { save() }
+    }
+
+    @Published var tagColumnDisplayMode: TagColumnDisplayMode {
+        didSet { save() }
+    }
+
+    @Published var abstractDisplayLanguage: AbstractDisplayLanguage {
+        didSet { save() }
+    }
+
+    @Published var titleDisplayLanguage: AbstractDisplayLanguage {
+        didSet { save() }
+    }
+
+    @Published var easyScholarAPIKey: String {
+        didSet {
+            persistSecretToKeychain(easyScholarAPIKey, account: Self.easyScholarAPIKeychainAccount)
+            save()
+        }
+    }
+
+    @Published var easyScholarFields: String {
+        didSet { save() }
+    }
+
+    @Published var easyScholarAbbreviations: String {
+        didSet { save() }
+    }
+
+    @Published var easyScholarColorHexes: String {
+        didSet { save() }
+    }
+
     @Published var inspectorMetadataOrder: [InspectorMetadataField] {
         didSet { save() }
     }
@@ -968,7 +1287,44 @@ final class SettingsStore: ObservableObject {
         didSet { save() }
     }
 
+    @Published var metadataRefreshPriority: MetadataRefreshPriority {
+        didSet { save() }
+    }
+
     @Published var tagQuickNumberMap: [String: Int] {
+        didSet { save() }
+    }
+
+    /// Hex color string for alternating odd rows, e.g. "#c66240". Empty = no alternating color.
+    @Published var alternatingRowColorHex: String {
+        didSet { save() }
+    }
+
+    /// Opacity for the alternating row color (0.0 – 1.0).
+    @Published var alternatingRowOpacity: Double {
+        didSet { save() }
+    }
+
+    @Published var tableSelectionTextColorHex: String {
+        didSet { save() }
+    }
+
+    @Published var starColorHex: String {
+        didSet { save() }
+    }
+
+    /// How much side panels blend toward the window background color (0.0 – 1.0).
+    @Published var sidebarGlassDesktopBlend: Double {
+        didSet { save() }
+    }
+
+    /// Extra tint overlay opacity for side panels (0.0 – 1.0).
+    @Published var sidebarGlassTintOpacity: Double {
+        didSet { save() }
+    }
+
+    /// Enables the in-app quick citation shortcut (left ⌘ + right ⌘).
+    @Published var quickCitationEnabled: Bool {
         didSet { save() }
     }
 
@@ -981,8 +1337,14 @@ final class SettingsStore: ObservableObject {
     private var activeSecurityScopedPapersURL: URL?
     private var mainWindowWidth: Double?
     private var mainWindowHeight: Double?
+    private var noteEditorWindowOriginX: Double?
+    private var noteEditorWindowOriginY: Double?
+    private var noteEditorWindowWidth: Double?
+    private var noteEditorWindowHeight: Double?
     private var pendingSaveTask: Task<Void, Never>?
     private var isLoadingSnapshot = false
+    private static let metadataAPIKeychainAccount = "metadata-api-key"
+    private static let easyScholarAPIKeychainAccount = "easyscholar-api-key"
 
     init() {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -1003,6 +1365,7 @@ final class SettingsStore: ObservableObject {
         pdf2zhEnvironmentKind = Self.defaultPDF2ZHEnvironmentKind
         pdf2zhEnvironmentName = Self.defaultPDF2ZHEnvironmentName
         pdf2zhCustomActivationCommand = ""
+        pdf2zhMaxConcurrentTasks = Self.defaultPDF2ZHMaxConcurrentTasks
         metadataPromptTemplate = Self.defaultMetadataPromptTemplate
         papersStorageDirectoryPath = Self.defaultPapersDirectoryPath
         citationPreset = .apa7
@@ -1011,12 +1374,14 @@ final class SettingsStore: ObservableObject {
         inTextCitationTemplate = defaultTemplate.inText
         referenceCitationTemplate = defaultTemplate.reference
         exportBibTeXFields = BibTeXExportFieldOptions()
-        rowHeightScaleFactor = 9
+        rowHeightScaleFactor = 6
         tableRowHeightMultiplier = 1
         recentReadingRange = .twoDays
         zombiePapersThreshold = .oneMonth
+        recentlyDeletedRetentionDays = Self.defaultRecentlyDeletedRetentionDays
         appLanguage = .chinese
-        mcpEnabled = false
+        toolbarIconOnly = true
+        mcpEnabled = true
         mcpServerName = Self.defaultMCPServerName
         mcpServerHost = Self.defaultMCPServerHost
         mcpServerPort = Self.defaultMCPServerPort
@@ -1028,17 +1393,39 @@ final class SettingsStore: ObservableObject {
         mcpSearchResultLimit = Self.defaultMCPSearchResultLimit
         mcpMaxNumericValues = Self.defaultMCPMaxNumericValues
         autoRenameImportedPDFFiles = true
+        preferTranslatedPDF = true
         imageThumbnailMaxSizeMultiplier = 0.5
         paperTableColumnVisibility = PaperTableColumnVisibility()
         paperTableColumnOrder = PaperTableColumn.defaultOrder
         paperTableColumnWidths = [:]
+        paperTimestampDateFormat = Self.defaultPaperTimestampDateFormat
+        tagColumnDisplayMode = .color
+        abstractDisplayLanguage = .original
+        titleDisplayLanguage = .original
+        easyScholarAPIKey = ""
+        easyScholarFields = Self.defaultEasyScholarFields
+        easyScholarAbbreviations = Self.defaultEasyScholarAbbreviations
+        easyScholarColorHexes = Self.defaultEasyScholarColorHexes
         inspectorMetadataOrder = InspectorMetadataField.defaultOrder
         metadataCustomRefreshFields = MetadataField.allCases
+        metadataRefreshPriority = .localFirst
         tagQuickNumberMap = [:]
+        alternatingRowColorHex = ""
+        alternatingRowOpacity = 0.035
+        tableSelectionTextColorHex = ""
+        starColorHex = Self.defaultStarColorHex
+        sidebarGlassDesktopBlend = 0.18
+        sidebarGlassTintOpacity = 0.08
+        quickCitationEnabled = true
         mainWindowWidth = nil
         mainWindowHeight = nil
+        noteEditorWindowOriginX = nil
+        noteEditorWindowOriginY = nil
+        noteEditorWindowWidth = nil
+        noteEditorWindowHeight = nil
 
         load()
+        restoreSecretsFromKeychainIfNeeded()
         ensureMetadataPromptFileIfNeeded()
         restorePapersDirectoryAccessIfPossible()
     }
@@ -1061,7 +1448,14 @@ final class SettingsStore: ObservableObject {
             provider: metadataAPIProvider,
             rawEndpoint: metadataAPIBaseURL
         )
-        return URL(string: normalizedEndpoint) ?? URL(string: metadataAPIProvider.defaultEndpoint)!
+        if let url = URL(string: normalizedEndpoint) {
+            return url
+        }
+        if let fallbackURL = URL(string: metadataAPIProvider.defaultEndpoint) {
+            return fallbackURL
+        }
+        return URL(string: MetadataAPIProvider.siliconFlow.defaultEndpoint)
+            ?? URL(fileURLWithPath: "/")
     }
 
     var resolvedAPIProvider: MetadataAPIProvider {
@@ -1075,6 +1469,18 @@ final class SettingsStore: ObservableObject {
 
     var resolvedThinkingEnabled: Bool {
         metadataThinkingMode == .thinking
+    }
+
+    var resolvedEasyScholarAPIKey: String {
+        let key = easyScholarAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !key.isEmpty {
+            return key
+        }
+
+        let env = ProcessInfo.processInfo.environment
+        return env["EASYSCHOLAR_SECRET_KEY"]
+            ?? env["EASYSCHOLAR_API_KEY"]
+            ?? ""
     }
 
     var resolvedPDF2ZHEnvironmentName: String {
@@ -1182,6 +1588,10 @@ final class SettingsStore: ObservableObject {
         zombiePapersThreshold.interval
     }
 
+    var resolvedRecentlyDeletedRetentionInterval: TimeInterval {
+        TimeInterval(Self.normalizedRecentlyDeletedRetentionDays(recentlyDeletedRetentionDays)) * 24 * 60 * 60
+    }
+
     var resolvedMainWindowSize: NSSize? {
         guard let mainWindowWidth, let mainWindowHeight else { return nil }
         guard mainWindowWidth.isFinite, mainWindowHeight.isFinite else { return nil }
@@ -1189,9 +1599,36 @@ final class SettingsStore: ObservableObject {
         return NSSize(width: mainWindowWidth, height: mainWindowHeight)
     }
 
+    var resolvedNoteEditorWindowFrame: NSRect? {
+        guard let noteEditorWindowOriginX,
+              let noteEditorWindowOriginY,
+              let noteEditorWindowWidth,
+              let noteEditorWindowHeight else {
+            return nil
+        }
+        guard noteEditorWindowOriginX.isFinite,
+              noteEditorWindowOriginY.isFinite,
+              noteEditorWindowWidth.isFinite,
+              noteEditorWindowHeight.isFinite else {
+            return nil
+        }
+        guard noteEditorWindowWidth >= 560, noteEditorWindowHeight >= 360 else { return nil }
+        return NSRect(
+            x: noteEditorWindowOriginX,
+            y: noteEditorWindowOriginY,
+            width: noteEditorWindowWidth,
+            height: noteEditorWindowHeight
+        )
+    }
+
     var resolvedMetadataPromptTemplate: String {
         let trimmed = metadataPromptTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? Self.defaultMetadataPromptTemplate : metadataPromptTemplate
+    }
+
+    var resolvedPaperTimestampDateFormat: String {
+        let trimmed = paperTimestampDateFormat.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? Self.defaultPaperTimestampDateFormat : trimmed
     }
 
     var metadataPromptFileURL: URL {
@@ -1222,12 +1659,16 @@ final class SettingsStore: ObservableObject {
     }
 
     var resolvedTableRowHeight: CGFloat {
-        let baseFontSize: CGFloat = 13
-        return max(18, baseFontSize)
+        24
+    }
+
+    var resolvedMaximumTableRowHeightMultiplier: CGFloat {
+        6
     }
 
     var resolvedMaximumTableRowHeight: CGFloat {
-        max(resolvedTableRowHeight, resolvedTableRowHeight * resolvedTableRowHeightScaleFactor)
+        let multiplier = min(max(1, resolvedTableRowHeightMultiplier), resolvedMaximumTableRowHeightMultiplier)
+        return resolvedTableRowHeight * multiplier
     }
 
     var resolvedExpandedTableLineLimit: Int {
@@ -1239,9 +1680,9 @@ final class SettingsStore: ObservableObject {
     var resolvedTableRowHeightScaleFactor: CGFloat {
         let factor = CGFloat(rowHeightScaleFactor)
         if !factor.isFinite || factor < 1 {
-            return 9
+            return 6
         }
-        return factor
+        return min(factor, resolvedMaximumTableRowHeightMultiplier)
     }
 
     var resolvedTableRowHeightMultiplier: CGFloat {
@@ -1260,8 +1701,20 @@ final class SettingsStore: ObservableObject {
         return min(max(multiplier, 0.1), 4)
     }
 
+    var resolvedSidebarGlassDesktopBlend: CGFloat {
+        let value = CGFloat(sidebarGlassDesktopBlend)
+        guard value.isFinite else { return 0.18 }
+        return min(max(value, 0), 1)
+    }
+
+    var resolvedSidebarGlassTintOpacity: CGFloat {
+        let value = CGFloat(sidebarGlassTintOpacity)
+        guard value.isFinite else { return 0.08 }
+        return min(max(value, 0), 1)
+    }
+
     func applyExpandedRowHeight() {
-        tableRowHeightMultiplier = 2
+        tableRowHeightMultiplier = Double(resolvedTableRowHeightScaleFactor)
     }
 
     func applyCompactRowHeight() {
@@ -1289,6 +1742,33 @@ final class SettingsStore: ObservableObject {
         guard mainWindowWidth != normalizedWidth || mainWindowHeight != normalizedHeight else { return }
         mainWindowWidth = normalizedWidth
         mainWindowHeight = normalizedHeight
+        save()
+    }
+
+    func recordNoteEditorWindowFrame(_ frame: CGRect) {
+        guard frame.origin.x.isFinite,
+              frame.origin.y.isFinite,
+              frame.size.width.isFinite,
+              frame.size.height.isFinite else {
+            return
+        }
+
+        let normalizedX = Double(round(frame.origin.x))
+        let normalizedY = Double(round(frame.origin.y))
+        let normalizedWidth = Double(max(560, round(frame.size.width)))
+        let normalizedHeight = Double(max(360, round(frame.size.height)))
+
+        guard noteEditorWindowOriginX != normalizedX
+            || noteEditorWindowOriginY != normalizedY
+            || noteEditorWindowWidth != normalizedWidth
+            || noteEditorWindowHeight != normalizedHeight else {
+            return
+        }
+
+        noteEditorWindowOriginX = normalizedX
+        noteEditorWindowOriginY = normalizedY
+        noteEditorWindowWidth = normalizedWidth
+        noteEditorWindowHeight = normalizedHeight
         save()
     }
 
@@ -1354,6 +1834,27 @@ final class SettingsStore: ObservableObject {
         paperTableColumnWidths = [:]
     }
 
+    private func restoreSecretsFromKeychainIfNeeded() {
+        if metadataAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let key = SettingsKeychain.read(account: Self.metadataAPIKeychainAccount) {
+            metadataAPIKey = key
+        } else {
+            persistSecretToKeychain(metadataAPIKey, account: Self.metadataAPIKeychainAccount)
+        }
+
+        if easyScholarAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let key = SettingsKeychain.read(account: Self.easyScholarAPIKeychainAccount) {
+            easyScholarAPIKey = key
+        } else {
+            persistSecretToKeychain(easyScholarAPIKey, account: Self.easyScholarAPIKeychainAccount)
+        }
+    }
+
+    private func persistSecretToKeychain(_ value: String, account: String) {
+        guard !isLoadingSnapshot else { return }
+        SettingsKeychain.save(value.trimmingCharacters(in: .whitespacesAndNewlines), account: account)
+    }
+
     func openStorageFolder() {
         NSWorkspace.shared.open(storageDirectory)
     }
@@ -1364,7 +1865,7 @@ final class SettingsStore: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
-    func generateMCPConfigurationFile() throws -> URL {
+    func generateMCPConfigurationFile(for client: MCPClientType) throws -> URL {
         let normalizedServerName = normalizedMCPServerName(mcpServerName, fallback: Self.defaultMCPServerName)
         let normalizedServerHost = normalizedMCPServerHost(mcpServerHost, fallback: Self.defaultMCPServerHost)
         let normalizedServerPort = normalizedMCPServerPort(mcpServerPort, fallback: Self.defaultMCPServerPort)
@@ -1411,50 +1912,24 @@ final class SettingsStore: ObservableObject {
         mcpSearchResultLimit = normalizedSearchResultLimit
         mcpMaxNumericValues = normalizedNumericLimit
 
-        let capabilities = [
-            "semantic_search",
-            "search_library",
-            "browse_library_structure",
-            "read_item_metadata",
-            "describe_metadata_fields",
-            "update_item_metadata",
-            "read_abstract",
-            "read_fulltext",
-            "search_annotations",
-            "find_similar",
-            "item_details",
-            "fulltext_cache_stats",
-            "semantic_index_status",
-            "manage_collections",
-            "create_or_update_items",
-            "manage_tags",
-            "create_or_append_notes"
-        ]
-
-        let config: [String: Any] = [
-            "enabled": mcpEnabled,
-            "provider": "litrix-mcp",
-            "generated_at": ISO8601DateFormatter().string(from: .now),
-            "server": [
-                "name": normalizedServerName,
-                "url": "http://\(normalizedServerHost):\(normalizedServerPort)\(normalizedServerPath)"
-            ],
-            "capabilities": capabilities,
-            "limits": [
-                "max_content_length": normalizedContentLength,
-                "max_attachments": normalizedMaxAttachments,
-                "max_notes": normalizedMaxNotes,
-                "max_keywords": normalizedKeywordLimit,
-                "search_result_limit": normalizedSearchResultLimit,
-                "max_numeric_values": normalizedNumericLimit
-            ]
-        ]
-
         let mcpDirectory = storageDirectory.appendingPathComponent("mcp", isDirectory: true)
         try fileManager.createDirectory(at: mcpDirectory, withIntermediateDirectories: true)
 
-        let data = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
-        let fileURL = mcpDirectory.appendingPathComponent("litrix-mcp-config.json", isDirectory: false)
+        let snippet = mcpConfigurationSnippet(for: client)
+        let fileExtension: String
+        switch client {
+        case .codexCLI, .claudeCode, .geminiCLI:
+            fileExtension = "toml"
+        case .customHTTP:
+            fileExtension = "txt"
+        default:
+            fileExtension = "json"
+        }
+        let fileURL = mcpDirectory.appendingPathComponent(
+            "litrix-mcp-\(client.rawValue).\(fileExtension)",
+            isDirectory: false
+        )
+        let data = Data(snippet.utf8)
         try data.write(to: fileURL, options: .atomic)
         return fileURL
     }
@@ -1470,6 +1945,21 @@ final class SettingsStore: ObservableObject {
         let endpoint = resolvedMCPServerURLString
 
         switch client {
+        case .qwenCode:
+            return """
+            {
+              "mcpServers": {
+                "\(serverName)": {
+                  "command": "npx",
+                  "args": [
+                    "mcp-remote",
+                    "\(endpoint)"
+                  ],
+                  "env": {}
+                }
+              }
+            }
+            """
         case .codexCLI, .claudeCode, .geminiCLI:
             return """
             [mcp_servers."\(serverName)"]
@@ -1507,6 +1997,17 @@ final class SettingsStore: ObservableObject {
         let serverName = resolvedMCPServerName
         let endpoint = resolvedMCPServerURLString
         let port = resolvedMCPServerPort
+        let qwenExtra = client == .qwenCode
+            ? """
+
+            ## Qwen 重要说明
+            - Litrix 导出的这段 JSON 与已验证可用的 Zotero Qwen 配置保持同一结构：外层 `mcpServers`，内层使用 `command + args + env`。
+            - 其中 `mcp-remote` 会把本地 STDIO 桥接到 Litrix 的 HTTP MCP 端点 `\(endpoint)`，避免 Qwen 对 `httpUrl` / `url` 字段兼容差异带来的识别问题。
+            - 如果你是手动编辑 `~/Library/Application Support/Qwen/settings.json`，Qwen 最终会把它存到 `mcp_config`；但在导入/粘贴阶段，按这份 `mcpServers` JSON 粘贴即可。
+            - 自检命令：`curl -sS -X POST \(endpoint) -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"test"}}}'`
+            - 自检结果里的 `serverInfo.name` 应该是 Litrix；如果显示为其他 MCP 服务，说明当前端口被占用，请在 Litrix 设置里更换 MCP 端口后重新生成配置。
+            """
+            : ""
 
         return """
         # \(client.documentationTitle)
@@ -1526,6 +2027,7 @@ final class SettingsStore: ObservableObject {
         2. 粘贴“配置内容”区域文本并保存。
         3. 重启客户端并连接 MCP。
         4. 先执行一次 `list tools` 或同等命令确认连接成功。
+        \(qwenExtra)
         """
     }
 
@@ -1539,6 +2041,7 @@ final class SettingsStore: ObservableObject {
 
     func applyImportedSettings(_ snapshot: AppSettingsSnapshot, preserveAPIKey: Bool) {
         let preservedKey = metadataAPIKey
+        let preservedEasyScholarKey = easyScholarAPIKey
         let nextProvider = snapshot.metadataAPIProvider ?? Self.inferAPIProvider(from: snapshot.metadataAPIBaseURL)
 
         metadataAPIProvider = nextProvider
@@ -1558,6 +2061,10 @@ final class SettingsStore: ObservableObject {
         pdf2zhEnvironmentKind = snapshot.pdf2zhEnvironmentKind ?? Self.defaultPDF2ZHEnvironmentKind
         pdf2zhEnvironmentName = snapshot.pdf2zhEnvironmentName ?? Self.defaultPDF2ZHEnvironmentName
         pdf2zhCustomActivationCommand = snapshot.pdf2zhCustomActivationCommand ?? ""
+        pdf2zhMaxConcurrentTasks = Self.normalizedPDF2ZHMaxConcurrentTasks(
+            snapshot.pdf2zhMaxConcurrentTasks,
+            fallback: pdf2zhMaxConcurrentTasks
+        )
         metadataPromptTemplate = snapshot.metadataPromptTemplate ?? metadataPromptTemplate
 
         let importedDirectoryPath = snapshot.papersStorageDirectoryPath?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1571,7 +2078,7 @@ final class SettingsStore: ObservableObject {
         inTextCitationTemplate = snapshot.inTextCitationTemplate
         referenceCitationTemplate = snapshot.referenceCitationTemplate
         exportBibTeXFields = snapshot.exportBibTeXFields
-        rowHeightScaleFactor = max(1, snapshot.rowHeightScaleFactor ?? rowHeightScaleFactor)
+        rowHeightScaleFactor = min(max(1, snapshot.rowHeightScaleFactor ?? rowHeightScaleFactor), 6)
         if let tableMultiplier = snapshot.tableRowHeightMultiplier, tableMultiplier > 0 {
             tableRowHeightMultiplier = tableMultiplier
         } else if let legacyPreset = snapshot.tableRowHeightPreset {
@@ -1579,11 +2086,15 @@ final class SettingsStore: ObservableObject {
         }
         recentReadingRange = snapshot.recentReadingRange ?? recentReadingRange
         zombiePapersThreshold = snapshot.zombiePapersThreshold ?? zombiePapersThreshold
+        recentlyDeletedRetentionDays = Self.normalizedRecentlyDeletedRetentionDays(
+            snapshot.recentlyDeletedRetentionDays,
+            fallback: recentlyDeletedRetentionDays
+        )
         appLanguage = snapshot.appLanguage ?? appLanguage
         mcpEnabled = snapshot.mcpEnabled ?? mcpEnabled
         mcpServerName = normalizedMCPServerName(snapshot.mcpServerName, fallback: mcpServerName)
         mcpServerHost = normalizedMCPServerHost(snapshot.mcpServerHost, fallback: mcpServerHost)
-        mcpServerPort = normalizedMCPServerPort(snapshot.mcpServerPort, fallback: mcpServerPort)
+        mcpServerPort = normalizedLoadedMCPServerPort(snapshot.mcpServerPort, fallback: mcpServerPort)
         mcpServerPath = normalizedMCPServerPath(snapshot.mcpServerPath, fallback: mcpServerPath)
         mcpMaxContentLength = normalizedMCPInt(
             snapshot.mcpMaxContentLength,
@@ -1616,6 +2127,7 @@ final class SettingsStore: ObservableObject {
             range: 1...2_000
         )
         autoRenameImportedPDFFiles = snapshot.autoRenameImportedPDFFiles ?? autoRenameImportedPDFFiles
+        preferTranslatedPDF = snapshot.preferTranslatedPDF ?? preferTranslatedPDF
         imageThumbnailMaxSizeMultiplier = normalizedImageThumbnailMaxSizeMultiplier(
             snapshot.imageThumbnailMaxSizeMultiplier,
             fallback: imageThumbnailMaxSizeMultiplier
@@ -1623,11 +2135,37 @@ final class SettingsStore: ObservableObject {
         paperTableColumnVisibility = snapshot.paperTableColumnVisibility ?? paperTableColumnVisibility
         paperTableColumnOrder = normalizedPaperTableColumnOrder(snapshot.paperTableColumnOrder)
         paperTableColumnWidths = normalizedPaperTableColumnWidths(snapshot.paperTableColumnWidths)
+        paperTimestampDateFormat = normalizedTimestampDateFormat(snapshot.paperTimestampDateFormat)
+        tagColumnDisplayMode = snapshot.tagColumnDisplayMode ?? tagColumnDisplayMode
+        abstractDisplayLanguage = snapshot.abstractDisplayLanguage ?? abstractDisplayLanguage
+        titleDisplayLanguage = snapshot.titleDisplayLanguage ?? titleDisplayLanguage
+        easyScholarAPIKey = preserveAPIKey ? preservedEasyScholarKey : (snapshot.easyScholarAPIKey ?? easyScholarAPIKey)
+        easyScholarFields = normalizedEasyScholarSetting(
+            snapshot.easyScholarFields,
+            fallback: Self.defaultEasyScholarFields
+        )
+        easyScholarAbbreviations = normalizedEasyScholarSetting(
+            snapshot.easyScholarAbbreviations,
+            fallback: Self.defaultEasyScholarAbbreviations
+        )
+        easyScholarColorHexes = snapshot.easyScholarColorHexes ?? Self.defaultEasyScholarColorHexes
         inspectorMetadataOrder = normalizedInspectorMetadataOrder(snapshot.inspectorMetadataOrder)
         metadataCustomRefreshFields = normalizedMetadataCustomRefreshFields(snapshot.metadataCustomRefreshFields)
         tagQuickNumberMap = normalizedTagQuickNumberMap(snapshot.tagQuickNumberMap)
+        alternatingRowColorHex = snapshot.alternatingRowColorHex ?? ""
+        alternatingRowOpacity = snapshot.alternatingRowOpacity ?? 0.035
+        tableSelectionTextColorHex = snapshot.tableSelectionTextColorHex ?? ""
+        starColorHex = snapshot.starColorHex ?? Self.defaultStarColorHex
+        sidebarGlassDesktopBlend = snapshot.sidebarGlassDesktopBlend ?? 0.18
+        sidebarGlassTintOpacity = snapshot.sidebarGlassTintOpacity ?? 0.08
+        quickCitationEnabled = snapshot.quickCitationEnabled ?? true
+        toolbarIconOnly = snapshot.toolbarIconOnly ?? toolbarIconOnly
         mainWindowWidth = snapshot.mainWindowWidth
         mainWindowHeight = snapshot.mainWindowHeight
+        noteEditorWindowOriginX = snapshot.noteEditorWindowOriginX
+        noteEditorWindowOriginY = snapshot.noteEditorWindowOriginY
+        noteEditorWindowWidth = snapshot.noteEditorWindowWidth
+        noteEditorWindowHeight = snapshot.noteEditorWindowHeight
 
         save()
     }
@@ -1696,8 +2234,8 @@ final class SettingsStore: ObservableObject {
             )
         case .gbt7714:
             return CitationTemplatePair(
-                inText: "（{{author}}，{{year}}）",
-                reference: "{{author}}. {{title}}[J]. {{journal}}, {{year}}, {{volume}}({{number}}): {{pages}}. DOI: {{doi}}"
+                inText: "（{{gbt7714Authors}}，{{year}}）",
+                reference: "{{gbt7714Authors}}. {{title}}[J]. {{journal}}, {{year}}, {{volume}}({{number}}): {{pages}}. DOI: {{doi}}"
             )
         case .mla9:
             return CitationTemplatePair(
@@ -1741,6 +2279,7 @@ final class SettingsStore: ObservableObject {
                 pdf2zhEnvironmentKind = snapshot.pdf2zhEnvironmentKind ?? Self.defaultPDF2ZHEnvironmentKind
                 pdf2zhEnvironmentName = snapshot.pdf2zhEnvironmentName ?? Self.defaultPDF2ZHEnvironmentName
                 pdf2zhCustomActivationCommand = snapshot.pdf2zhCustomActivationCommand ?? ""
+                pdf2zhMaxConcurrentTasks = Self.normalizedPDF2ZHMaxConcurrentTasks(snapshot.pdf2zhMaxConcurrentTasks)
                 metadataPromptTemplate = snapshot.metadataPromptTemplate ?? Self.defaultMetadataPromptTemplate
                 migrateMetadataPromptTemplateIfNeeded()
                 papersStorageDirectoryPath = snapshot.papersStorageDirectoryPath ?? Self.defaultPapersDirectoryPath
@@ -1750,7 +2289,7 @@ final class SettingsStore: ObservableObject {
                 referenceCitationTemplate = snapshot.referenceCitationTemplate
                 migrateCitationTemplateIfNeeded()
                 exportBibTeXFields = snapshot.exportBibTeXFields
-                rowHeightScaleFactor = max(1, snapshot.rowHeightScaleFactor ?? 9)
+                rowHeightScaleFactor = min(max(1, snapshot.rowHeightScaleFactor ?? 6), 6)
                 if let savedMultiplier = snapshot.tableRowHeightMultiplier, savedMultiplier > 0 {
                     tableRowHeightMultiplier = savedMultiplier
                 } else if let legacyPreset = snapshot.tableRowHeightPreset {
@@ -1760,11 +2299,14 @@ final class SettingsStore: ObservableObject {
                 }
                 recentReadingRange = snapshot.recentReadingRange ?? .twoDays
                 zombiePapersThreshold = snapshot.zombiePapersThreshold ?? .oneMonth
+                recentlyDeletedRetentionDays = Self.normalizedRecentlyDeletedRetentionDays(
+                    snapshot.recentlyDeletedRetentionDays
+                )
                 appLanguage = snapshot.appLanguage ?? .chinese
-                mcpEnabled = snapshot.mcpEnabled ?? false
+                mcpEnabled = snapshot.mcpEnabled ?? true
                 mcpServerName = normalizedMCPServerName(snapshot.mcpServerName, fallback: Self.defaultMCPServerName)
                 mcpServerHost = normalizedMCPServerHost(snapshot.mcpServerHost, fallback: Self.defaultMCPServerHost)
-                mcpServerPort = normalizedMCPServerPort(snapshot.mcpServerPort, fallback: Self.defaultMCPServerPort)
+                mcpServerPort = normalizedLoadedMCPServerPort(snapshot.mcpServerPort, fallback: Self.defaultMCPServerPort)
                 mcpServerPath = normalizedMCPServerPath(snapshot.mcpServerPath, fallback: Self.defaultMCPServerPath)
                 mcpMaxContentLength = normalizedMCPInt(
                     snapshot.mcpMaxContentLength,
@@ -1797,6 +2339,7 @@ final class SettingsStore: ObservableObject {
                     range: 1...2_000
                 )
                 autoRenameImportedPDFFiles = snapshot.autoRenameImportedPDFFiles ?? true
+                preferTranslatedPDF = snapshot.preferTranslatedPDF ?? true
                 imageThumbnailMaxSizeMultiplier = normalizedImageThumbnailMaxSizeMultiplier(
                     snapshot.imageThumbnailMaxSizeMultiplier,
                     fallback: 0.5
@@ -1804,11 +2347,38 @@ final class SettingsStore: ObservableObject {
                 paperTableColumnVisibility = snapshot.paperTableColumnVisibility ?? PaperTableColumnVisibility()
                 paperTableColumnOrder = normalizedPaperTableColumnOrder(snapshot.paperTableColumnOrder)
                 paperTableColumnWidths = normalizedPaperTableColumnWidths(snapshot.paperTableColumnWidths)
+                paperTimestampDateFormat = normalizedTimestampDateFormat(snapshot.paperTimestampDateFormat)
+                tagColumnDisplayMode = snapshot.tagColumnDisplayMode ?? .color
+                abstractDisplayLanguage = snapshot.abstractDisplayLanguage ?? .original
+                titleDisplayLanguage = snapshot.titleDisplayLanguage ?? .original
+                easyScholarAPIKey = snapshot.easyScholarAPIKey ?? ""
+                easyScholarFields = normalizedEasyScholarSetting(
+                    snapshot.easyScholarFields,
+                    fallback: Self.defaultEasyScholarFields
+                )
+                easyScholarAbbreviations = normalizedEasyScholarSetting(
+                    snapshot.easyScholarAbbreviations,
+                    fallback: Self.defaultEasyScholarAbbreviations
+                )
+                easyScholarColorHexes = snapshot.easyScholarColorHexes ?? Self.defaultEasyScholarColorHexes
                 inspectorMetadataOrder = normalizedInspectorMetadataOrder(snapshot.inspectorMetadataOrder)
                 metadataCustomRefreshFields = normalizedMetadataCustomRefreshFields(snapshot.metadataCustomRefreshFields)
+                metadataRefreshPriority = snapshot.metadataRefreshPriority ?? .localFirst
                 tagQuickNumberMap = normalizedTagQuickNumberMap(snapshot.tagQuickNumberMap)
+                alternatingRowColorHex = snapshot.alternatingRowColorHex ?? ""
+                alternatingRowOpacity = snapshot.alternatingRowOpacity ?? 0.035
+                tableSelectionTextColorHex = snapshot.tableSelectionTextColorHex ?? ""
+                starColorHex = snapshot.starColorHex ?? Self.defaultStarColorHex
+                sidebarGlassDesktopBlend = snapshot.sidebarGlassDesktopBlend ?? 0.18
+                sidebarGlassTintOpacity = snapshot.sidebarGlassTintOpacity ?? 0.08
+                quickCitationEnabled = snapshot.quickCitationEnabled ?? true
+                toolbarIconOnly = snapshot.toolbarIconOnly ?? true
                 mainWindowWidth = snapshot.mainWindowWidth
                 mainWindowHeight = snapshot.mainWindowHeight
+                noteEditorWindowOriginX = snapshot.noteEditorWindowOriginX
+                noteEditorWindowOriginY = snapshot.noteEditorWindowOriginY
+                noteEditorWindowWidth = snapshot.noteEditorWindowWidth
+                noteEditorWindowHeight = snapshot.noteEditorWindowHeight
                 return
             }
 
@@ -1858,8 +2428,11 @@ final class SettingsStore: ObservableObject {
     }
 
     private var storageDirectory: URL {
-        fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Litrix", isDirectory: true)
+        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("Application Support", isDirectory: true)
+        return base.appendingPathComponent("Litrix", isDirectory: true)
     }
 
     private var legacyStorageDirectory: URL {
@@ -1970,6 +2543,26 @@ final class SettingsStore: ObservableObject {
     }
 
     private func migrateCitationTemplateIfNeeded() {
+        if citationPreset == .gbt7714 {
+            let normalizedInText = inTextCitationTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedReference = referenceCitationTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
+            let legacyGBTAauthors =
+                normalizedInText.contains("{{author}}")
+                || normalizedReference.contains("{{author}}")
+
+            if legacyGBTAauthors {
+                inTextCitationTemplate = normalizedInText.replacingOccurrences(
+                    of: "{{author}}",
+                    with: "{{gbt7714Authors}}"
+                )
+                referenceCitationTemplate = normalizedReference.replacingOccurrences(
+                    of: "{{author}}",
+                    with: "{{gbt7714Authors}}"
+                )
+            }
+            return
+        }
+
         guard citationPreset == .apa7 else { return }
         let normalizedInText = inTextCitationTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedReference = referenceCitationTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2048,6 +2641,7 @@ final class SettingsStore: ObservableObject {
             pdf2zhEnvironmentKind: pdf2zhEnvironmentKind,
             pdf2zhEnvironmentName: pdf2zhEnvironmentName,
             pdf2zhCustomActivationCommand: pdf2zhCustomActivationCommand,
+            pdf2zhMaxConcurrentTasks: Self.normalizedPDF2ZHMaxConcurrentTasks(pdf2zhMaxConcurrentTasks),
             metadataPromptTemplate: metadataPromptTemplate,
             papersStorageDirectoryPath: papersStorageDirectoryPath,
             papersStorageBookmarkData: includeSecrets ? papersStorageBookmarkData : nil,
@@ -2060,6 +2654,7 @@ final class SettingsStore: ObservableObject {
             tableRowHeightMultiplier: tableRowHeightMultiplier,
             recentReadingRange: recentReadingRange,
             zombiePapersThreshold: zombiePapersThreshold,
+            recentlyDeletedRetentionDays: Self.normalizedRecentlyDeletedRetentionDays(recentlyDeletedRetentionDays),
             appLanguage: appLanguage,
             mcpEnabled: mcpEnabled,
             mcpServerName: resolvedMCPServerName,
@@ -2073,6 +2668,7 @@ final class SettingsStore: ObservableObject {
             mcpSearchResultLimit: normalizedMCPInt(mcpSearchResultLimit, fallback: Self.defaultMCPSearchResultLimit, range: 1...500),
             mcpMaxNumericValues: normalizedMCPInt(mcpMaxNumericValues, fallback: Self.defaultMCPMaxNumericValues, range: 1...2_000),
             autoRenameImportedPDFFiles: autoRenameImportedPDFFiles,
+            preferTranslatedPDF: preferTranslatedPDF,
             imageThumbnailMaxSizeMultiplier: normalizedImageThumbnailMaxSizeMultiplier(
                 imageThumbnailMaxSizeMultiplier,
                 fallback: 0.5
@@ -2080,11 +2676,32 @@ final class SettingsStore: ObservableObject {
             paperTableColumnVisibility: paperTableColumnVisibility,
             paperTableColumnOrder: normalizedPaperTableColumnOrder(paperTableColumnOrder),
             paperTableColumnWidths: normalizedPaperTableColumnWidths(paperTableColumnWidths),
+            paperTimestampDateFormat: normalizedTimestampDateFormat(paperTimestampDateFormat),
+            tagColumnDisplayMode: tagColumnDisplayMode,
+            abstractDisplayLanguage: abstractDisplayLanguage,
+            titleDisplayLanguage: titleDisplayLanguage,
+            easyScholarAPIKey: includeSecrets ? easyScholarAPIKey : "",
+            easyScholarFields: easyScholarFields,
+            easyScholarAbbreviations: easyScholarAbbreviations,
+            easyScholarColorHexes: easyScholarColorHexes,
             inspectorMetadataOrder: normalizedInspectorMetadataOrder(inspectorMetadataOrder),
             metadataCustomRefreshFields: normalizedMetadataCustomRefreshFields(metadataCustomRefreshFields),
+            metadataRefreshPriority: metadataRefreshPriority,
             tagQuickNumberMap: normalizedTagQuickNumberMap(tagQuickNumberMap),
+            alternatingRowColorHex: alternatingRowColorHex,
+            alternatingRowOpacity: alternatingRowOpacity,
+            tableSelectionTextColorHex: tableSelectionTextColorHex,
+            starColorHex: starColorHex,
+            sidebarGlassDesktopBlend: min(max(sidebarGlassDesktopBlend, 0), 1),
+            sidebarGlassTintOpacity: min(max(sidebarGlassTintOpacity, 0), 1),
+            quickCitationEnabled: quickCitationEnabled,
+            toolbarIconOnly: toolbarIconOnly,
             mainWindowWidth: mainWindowWidth,
-            mainWindowHeight: mainWindowHeight
+            mainWindowHeight: mainWindowHeight,
+            noteEditorWindowOriginX: noteEditorWindowOriginX,
+            noteEditorWindowOriginY: noteEditorWindowOriginY,
+            noteEditorWindowWidth: noteEditorWindowWidth,
+            noteEditorWindowHeight: noteEditorWindowHeight
         )
     }
 
@@ -2103,13 +2720,19 @@ final class SettingsStore: ObservableObject {
     private func normalizedPaperTableColumnOrder(_ order: [PaperTableColumn]?) -> [PaperTableColumn] {
         let base = order ?? PaperTableColumn.defaultOrder
         var result: [PaperTableColumn] = []
-        for column in base where !result.contains(column) {
+        for column in base where column != .englishTitle && !result.contains(column) {
             result.append(column)
         }
         for column in PaperTableColumn.defaultOrder where !result.contains(column) {
             result.append(column)
         }
         return result
+    }
+
+    private func normalizedEasyScholarSetting(_ value: String?, fallback: String) -> String {
+        guard let value else { return fallback }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : value
     }
 
     private func normalizedPaperTableColumnWidths(_ widths: [String: Double]?) -> [String: Double] {
@@ -2121,6 +2744,11 @@ final class SettingsStore: ObservableObject {
             result[column.rawValue] = max(36, width)
         }
         return result
+    }
+
+    private func normalizedTimestampDateFormat(_ value: String?) -> String {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? Self.defaultPaperTimestampDateFormat : trimmed
     }
 
     private func normalizedMetadataCustomRefreshFields(_ fields: [MetadataField]?) -> [MetadataField] {
@@ -2147,6 +2775,25 @@ final class SettingsStore: ObservableObject {
         return result
     }
 
+    private static func normalizedRecentlyDeletedRetentionDays(
+        _ value: Int?,
+        fallback: Int = defaultRecentlyDeletedRetentionDays
+    ) -> Int {
+        let candidate = value ?? fallback
+        return min(
+            max(candidate, recentlyDeletedRetentionDayRange.lowerBound),
+            recentlyDeletedRetentionDayRange.upperBound
+        )
+    }
+
+    private static func normalizedPDF2ZHMaxConcurrentTasks(
+        _ value: Int?,
+        fallback: Int = defaultPDF2ZHMaxConcurrentTasks
+    ) -> Int {
+        let candidate = value ?? fallback
+        return min(max(candidate, 1), 6)
+    }
+
     private func normalizedMCPServerName(_ value: String?, fallback: String) -> String {
         let trimmed = (value ?? fallback).trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? Self.defaultMCPServerName : trimmed
@@ -2163,6 +2810,14 @@ final class SettingsStore: ObservableObject {
             return candidate
         }
         return min(max(candidate, 1), 65_535)
+    }
+
+    private func normalizedLoadedMCPServerPort(_ value: Int?, fallback: Int) -> Int {
+        let port = normalizedMCPServerPort(value, fallback: fallback)
+        if port == Self.legacyMCPServerPort || port == Self.officeAddinStaticServerPort {
+            return Self.defaultMCPServerPort
+        }
+        return port
     }
 
     private func normalizedMCPServerPath(_ value: String?, fallback: String) -> String {

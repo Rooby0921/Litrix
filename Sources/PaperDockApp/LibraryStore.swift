@@ -11,6 +11,14 @@ struct PDFImportResult {
     static let empty = PDFImportResult()
 }
 
+struct BibTeXImportResult {
+    var importedPaperIDs: [UUID] = []
+    var duplicateTitles: [String] = []
+    var failedFiles: [String] = []
+
+    static let empty = BibTeXImportResult()
+}
+
 @MainActor
 final class LibraryStore: ObservableObject {
     @Published private(set) var papers: [Paper] = [] {
@@ -22,9 +30,24 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var collections: [String] = []
     @Published private(set) var tags: [String] = []
     @Published private(set) var tagColorHexes: [String: String] = [:]
+    @Published private(set) var collectionMetadata: [String: TaxonomyItemMetadata] = [:]
+    @Published private(set) var tagMetadata: [String: TaxonomyItemMetadata] = [:]
     @Published private(set) var dataRevision: Int = 0
 
     private let fileManager = FileManager.default
+    private let supportedAttachmentFileExtensions: Set<String> = [
+        "pdf",
+        "doc", "docx",
+        "xls", "xlsx", "csv",
+        "ppt", "pptx",
+        "epub", "mobi",
+        "html", "htm",
+        "png", "jpg", "jpeg", "tif", "tiff", "gif", "bmp", "heic", "webp",
+        "txt", "rtf", "md"
+    ]
+    private let supportedImageExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "tif", "tiff", "gif", "bmp", "heic", "webp"
+    ]
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let legacyNoteFileName = "Note.txt"
@@ -38,11 +61,14 @@ final class LibraryStore: ObservableObject {
     private var lastAttachmentPresenceRevalidationAt: Date = .distantPast
     private var lastDynamicCountConfig = DynamicCountConfig(
         recentReadingInterval: 0,
-        zombieInterval: 0
+        zombieInterval: 0,
+        recentlyDeletedRetentionInterval: 0
     )
     private var pendingSaveTask: Task<Void, Never>?
     private var lastBackupWriteAt: Date = .distantPast
+    private var autoSaveSuspended = false
     private var terminateObserver: NSObjectProtocol?
+    private var recentlyDeletedCleanupTask: Task<Void, Never>?
 
     private struct SidebarCountSnapshot {
         var all = 0
@@ -51,6 +77,7 @@ final class LibraryStore: ObservableObject {
         var unfiled = 0
         var missingDOI = 0
         var missingAttachment = 0
+        var recentlyDeleted = 0
         var collections: [String: Int] = [:]
         var tags: [String: Int] = [:]
 
@@ -58,13 +85,14 @@ final class LibraryStore: ObservableObject {
     }
 
     private struct AttachmentPresenceCacheEntry {
-        var pdfPath: String?
+        var signature: String
         var isMissing: Bool
     }
 
     private struct DynamicCountConfig: Equatable {
         var recentReadingInterval: TimeInterval
         var zombieInterval: TimeInterval
+        var recentlyDeletedRetentionInterval: TimeInterval
     }
 
     init(settings: SettingsStore) {
@@ -86,6 +114,8 @@ final class LibraryStore: ObservableObject {
         }
 
         load()
+        purgeExpiredDeletedPapers()
+        startRecentlyDeletedCleanupTask()
     }
 
     var papersStorageRootURL: URL {
@@ -97,7 +127,9 @@ final class LibraryStore: ObservableObject {
             papers: papers,
             collections: collections,
             tags: tags,
-            tagColorHexes: tagColorHexes
+            tagColorHexes: tagColorHexes,
+            collectionMetadata: collectionMetadata,
+            tagMetadata: tagMetadata
         )
     }
 
@@ -108,6 +140,8 @@ final class LibraryStore: ObservableObject {
         collections = snapshot.collections
         tags = snapshot.tags
         tagColorHexes = snapshot.tagColorHexes
+        collectionMetadata = snapshot.collectionMetadata
+        tagMetadata = snapshot.tagMetadata
         syncTaxonomies()
         save()
     }
@@ -146,14 +180,15 @@ final class LibraryStore: ObservableObject {
             return result
         }
 
-        var existingTitleKeys = Set(
+        var existingTitleAuthorKeys = Set(
             papers
-                .map(\.title)
-                .map(normalizedPaperTitle)
+                .filter { !$0.isDeleted }
+                .map { duplicateTitleAuthorKey(title: $0.title, authors: $0.authors) }
                 .filter { !$0.isEmpty }
         )
         var existingDOIKeys = Set(
             papers
+                .filter { !$0.isDeleted }
                 .map(\.doi)
                 .map(normalizedDOI)
                 .filter { !$0.isEmpty }
@@ -169,40 +204,64 @@ final class LibraryStore: ObservableObject {
                 }
 
                 let parsed = FileNameParser.parse(url: url)
-                let extracted = extractPDFCoreMetadata(from: url)
+                let extracted = extractDocumentCoreMetadata(from: url)
                 let resolvedTitle: String = {
-                    let extractedTitle = extracted.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let extractedTitle = MetadataValueNormalizer.normalizeTitle(extracted.title)
                     if !extractedTitle.isEmpty {
                         return extractedTitle
                     }
-                    return parsed.title.isEmpty ? url.deletingPathExtension().lastPathComponent : parsed.title
+                    let parsedTitle = MetadataValueNormalizer.normalizeTitle(parsed.title)
+                    return parsedTitle.isEmpty ? url.deletingPathExtension().lastPathComponent : parsedTitle
                 }()
                 let resolvedAuthors: String = {
-                    let extractedAuthors = extracted.authors.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let extractedAuthors = MetadataValueNormalizer.normalizeAuthors(extracted.authors)
                     if !extractedAuthors.isEmpty {
                         return extractedAuthors
                     }
-                    return parsed.authors
+                    return MetadataValueNormalizer.normalizeAuthors(parsed.authors)
                 }()
                 let resolvedYear: String = {
-                    let extractedYear = extracted.year.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let extractedYear = MetadataValueNormalizer.normalizeYear(extracted.year)
                     if !extractedYear.isEmpty {
                         return extractedYear
                     }
-                    return parsed.year
+                    return MetadataValueNormalizer.normalizeYear(parsed.year)
                 }()
-                let resolvedDOI = extracted.doi.trimmingCharacters(in: .whitespacesAndNewlines)
-                let normalizedTitle = normalizedPaperTitle(resolvedTitle)
+                let resolvedSource: String = {
+                    let extractedSource = MetadataValueNormalizer.normalizeSource(extracted.source)
+                    if !extractedSource.isEmpty {
+                        return extractedSource
+                    }
+                    return MetadataValueNormalizer.normalizeSource(detectSourceInFileName(url))
+                }()
+                let resolvedDOI = MetadataValueNormalizer.normalizeDOI(extracted.doi)
+                let resolvedVolume = MetadataValueNormalizer.normalizeVolume(extracted.volume)
+                let resolvedIssue = MetadataValueNormalizer.normalizeIssue(extracted.issue)
+                let resolvedPages = MetadataValueNormalizer.normalizePages(extracted.pages)
+                let titleAuthorKey = duplicateTitleAuthorKey(title: resolvedTitle, authors: resolvedAuthors)
                 let normalizedResolvedDOI = normalizedDOI(resolvedDOI)
 
+                var duplicateWarning: String?
                 if !normalizedResolvedDOI.isEmpty, existingDOIKeys.contains(normalizedResolvedDOI) {
-                    result.duplicateTitles.append(resolvedDOI.isEmpty ? resolvedTitle : "\(resolvedTitle) [\(resolvedDOI)]")
-                    return
+                    duplicateWarning = duplicateDisplayName(
+                        title: resolvedTitle,
+                        authors: resolvedAuthors,
+                        doi: resolvedDOI
+                    )
                 }
 
-                if !normalizedTitle.isEmpty, existingTitleKeys.contains(normalizedTitle) {
-                    result.duplicateTitles.append(resolvedTitle)
-                    return
+                if duplicateWarning == nil,
+                   !titleAuthorKey.isEmpty,
+                   existingTitleAuthorKeys.contains(titleAuthorKey) {
+                    duplicateWarning = duplicateDisplayName(
+                        title: resolvedTitle,
+                        authors: resolvedAuthors,
+                        doi: resolvedDOI
+                    )
+                }
+
+                if let duplicateWarning {
+                    result.duplicateTitles.append(duplicateWarning)
                 }
 
                 do {
@@ -211,27 +270,32 @@ final class LibraryStore: ObservableObject {
                         title: resolvedTitle,
                         authors: resolvedAuthors,
                         year: resolvedYear,
+                        source: resolvedSource,
                         doi: resolvedDOI,
                         notes: "",
+                        volume: resolvedVolume,
+                        issue: resolvedIssue,
+                        pages: resolvedPages,
                         storageFolderName: importedAssets.folderName,
                         storedPDFFileName: importedAssets.pdfURL.lastPathComponent,
                         originalPDFFileName: url.lastPathComponent,
                         imageFileNames: []
                     )
                     papers.insert(paper, at: 0)
-                    if settings.autoRenameImportedPDFFiles {
+                    if settings.autoRenameImportedPDFFiles,
+                       url.pathExtension.lowercased() == "pdf" {
                         _ = renameStoredPDF(forPaperID: paper.id, shouldPersist: false)
                     }
                     result.importedPaperIDs.append(paper.id)
-                    if !normalizedTitle.isEmpty {
-                        existingTitleKeys.insert(normalizedTitle)
+                    if !titleAuthorKey.isEmpty {
+                        existingTitleAuthorKeys.insert(titleAuthorKey)
                     }
                     if !normalizedResolvedDOI.isEmpty {
                         existingDOIKeys.insert(normalizedResolvedDOI)
                     }
                 } catch {
                     result.failedFiles.append(url.lastPathComponent)
-                    print("导入 PDF 失败(\(url.lastPathComponent)): \(error.localizedDescription)")
+                    print("导入文献文件失败(\(url.lastPathComponent)): \(error.localizedDescription)")
                 }
             }
         }
@@ -253,10 +317,25 @@ final class LibraryStore: ObservableObject {
         save()
     }
 
-    func importBibTeX(from urls: [URL]) {
-        guard !urls.isEmpty else { return }
+    @discardableResult
+    func importBibTeX(from urls: [URL]) -> BibTeXImportResult {
+        guard !urls.isEmpty else { return .empty }
 
-        var imported: [Paper] = []
+        var result = BibTeXImportResult()
+        var existingTitleAuthorKeys = Set(
+            papers
+                .filter { !$0.isDeleted }
+                .map { duplicateTitleAuthorKey(title: $0.title, authors: $0.authors) }
+                .filter { !$0.isEmpty }
+        )
+        var existingDOIKeys = Set(
+            papers
+                .filter { !$0.isDeleted }
+                .map(\.doi)
+                .map(normalizedDOI)
+                .filter { !$0.isEmpty }
+        )
+
         for url in urls {
             let needsAccess = url.startAccessingSecurityScopedResource()
             defer {
@@ -265,26 +344,89 @@ final class LibraryStore: ObservableObject {
                 }
             }
 
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+                result.failedFiles.append(url.lastPathComponent)
+                continue
+            }
             let entries = parseBibTeXEntries(from: text)
             for entry in entries {
-                imported.append(paper(from: entry))
+                let paper = paper(from: entry)
+                let titleAuthorKey = duplicateTitleAuthorKey(title: paper.title, authors: paper.authors)
+                let doiKey = normalizedDOI(paper.doi)
+
+                if (!doiKey.isEmpty && existingDOIKeys.contains(doiKey))
+                    || (!titleAuthorKey.isEmpty && existingTitleAuthorKeys.contains(titleAuthorKey)) {
+                    result.duplicateTitles.append(
+                        duplicateDisplayName(title: paper.title, authors: paper.authors, doi: paper.doi)
+                    )
+                }
+
+                papers.insert(paper, at: 0)
+                result.importedPaperIDs.append(paper.id)
+                if !titleAuthorKey.isEmpty {
+                    existingTitleAuthorKeys.insert(titleAuthorKey)
+                }
+                if !doiKey.isEmpty {
+                    existingDOIKeys.insert(doiKey)
+                }
             }
         }
 
-        guard !imported.isEmpty else { return }
-        papers.insert(contentsOf: imported, at: 0)
+        guard !result.importedPaperIDs.isEmpty else { return result }
         syncTaxonomies()
         save()
+        return result
     }
 
-    func addMetadataOnlyPaper(_ paper: Paper) {
-        if isDuplicatePaper(title: paper.title, doi: paper.doi) {
-            return
+    func hasPotentialDuplicate(_ paper: Paper, excludingPaperID: UUID? = nil) -> Bool {
+        hasPotentialDuplicate(
+            title: paper.title,
+            authors: paper.authors,
+            doi: paper.doi,
+            excludingPaperID: excludingPaperID
+        )
+    }
+
+    func hasPotentialDuplicate(
+        title: String,
+        authors: String,
+        doi: String,
+        excludingPaperID: UUID? = nil
+    ) -> Bool {
+        let titleAuthorKey = duplicateTitleAuthorKey(title: title, authors: authors)
+        let doiKey = normalizedDOI(doi)
+        return papers.contains { existing in
+            if existing.isDeleted {
+                return false
+            }
+            if existing.id == excludingPaperID {
+                return false
+            }
+            if !doiKey.isEmpty && normalizedDOI(existing.doi) == doiKey {
+                return true
+            }
+            if !titleAuthorKey.isEmpty,
+               duplicateTitleAuthorKey(title: existing.title, authors: existing.authors) == titleAuthorKey {
+                return true
+            }
+            return false
         }
-        papers.insert(paper, at: 0)
-        syncTaxonomies()
-        save()
+    }
+
+    @discardableResult
+    func addMetadataOnlyPaper(_ paper: Paper) -> Bool {
+        var paper = paper
+        do {
+            _ = try ensurePaperDirectory(for: &paper)
+            papers.insert(paper, at: 0)
+            syncTaxonomies()
+            save()
+            return true
+        } catch {
+            NSSound.beep()
+            print("创建无附件条目失败: \(error.localizedDescription)")
+            return false
+        }
     }
 
     func importLitrixLibrary(
@@ -397,6 +539,7 @@ final class LibraryStore: ObservableObject {
         guard let index = indexOfPaper(id: paper.id) else { return }
         let previous = papers[index]
         var updated = paper
+        updated.refreshDerivedSearchData()
         let shouldAutoUpdateEditedTimestamp =
             !preserveExplicitLastEditedTimestamp
             || previous.lastEditedAtMilliseconds == updated.lastEditedAtMilliseconds
@@ -417,7 +560,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func createCollection(named name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = TaxonomyHierarchy.normalizedPath(name)
         guard !trimmed.isEmpty else { return }
         guard !collections.contains(trimmed) else { return }
         collections = (collections + [trimmed]).uniquedAndSorted()
@@ -425,16 +568,99 @@ final class LibraryStore: ObservableObject {
     }
 
     func createTag(named name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = TaxonomyHierarchy.normalizedPath(name)
         guard !trimmed.isEmpty else { return }
         guard !tags.contains(trimmed) else { return }
         tags = (tags + [trimmed]).uniquedAndSorted()
         save()
     }
 
+    func createTaxonomyItem(kind: TaxonomyKind, named name: String, parentPath: String? = nil) {
+        let path = TaxonomyHierarchy.path(parent: parentPath, name: name)
+        guard !path.isEmpty, TaxonomyHierarchy.depth(of: path) <= TaxonomyHierarchy.maximumDepth else { return }
+
+        switch kind {
+        case .collection:
+            guard !collections.contains(path) else { return }
+            collections = (collections + [path]).uniquedAndSorted()
+        case .tag:
+            guard !tags.contains(path) else { return }
+            tags = (tags + [path]).uniquedAndSorted()
+        }
+        save()
+    }
+
+    func createTaxonomySibling(kind: TaxonomyKind, named name: String, relativeTo path: String) {
+        createTaxonomyItem(kind: kind, named: name, parentPath: TaxonomyHierarchy.parentPath(of: path))
+    }
+
+    func createTaxonomyChild(kind: TaxonomyKind, named name: String, under path: String) {
+        guard TaxonomyHierarchy.depth(of: path) < TaxonomyHierarchy.maximumDepth else { return }
+        createTaxonomyItem(kind: kind, named: name, parentPath: path)
+    }
+
+    func createTaxonomyParent(kind: TaxonomyKind, named name: String, above path: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedPath = TaxonomyHierarchy.normalizedPath(path)
+        guard !trimmed.isEmpty, !normalizedPath.isEmpty else { return }
+
+        let affectedPaths = taxonomyItems(for: kind).filter {
+            TaxonomyHierarchy.isDescendant($0, of: normalizedPath)
+        }
+        let deepestAffectedDepth = affectedPaths.map(TaxonomyHierarchy.depth).max() ?? TaxonomyHierarchy.depth(of: normalizedPath)
+        guard deepestAffectedDepth < TaxonomyHierarchy.maximumDepth else { return }
+
+        let oldParent = TaxonomyHierarchy.parentPath(of: normalizedPath)
+        let proposedParent = TaxonomyHierarchy.path(parent: oldParent, name: trimmed)
+        let newParent = uniqueTaxonomyPath(proposedParent, kind: kind)
+        guard !newParent.isEmpty else { return }
+        let newRoot = "\(newParent)\(TaxonomyHierarchy.separator)\(TaxonomyHierarchy.leafName(of: normalizedPath))"
+        replaceTaxonomyPrefix(kind: kind, oldPrefix: normalizedPath, newPrefix: newRoot)
+
+        var items = taxonomyItems(for: kind)
+        items.append(newParent)
+        setTaxonomyItems(items.uniquedAndSorted(), for: kind)
+        syncTaxonomies()
+        save()
+    }
+
+    func moveTaxonomyItem(kind: TaxonomyKind, sourcePath: String, targetPath: String, asChild: Bool) {
+        let source = TaxonomyHierarchy.normalizedPath(sourcePath)
+        let target = TaxonomyHierarchy.normalizedPath(targetPath)
+        guard !source.isEmpty, !target.isEmpty, source != target else { return }
+        guard taxonomyItems(for: kind).contains(source), taxonomyItems(for: kind).contains(target) else { return }
+        guard !TaxonomyHierarchy.isDescendant(target, of: source) else { return }
+
+        let affectedPaths = taxonomyItems(for: kind).filter {
+            TaxonomyHierarchy.isDescendant($0, of: source)
+        }
+        let sourceDepth = TaxonomyHierarchy.depth(of: source)
+        let deepestRelativeDepth = affectedPaths
+            .map { TaxonomyHierarchy.depth(of: $0) - sourceDepth + 1 }
+            .max() ?? 1
+
+        let destinationParent: String?
+        if asChild, TaxonomyHierarchy.depth(of: target) + deepestRelativeDepth <= TaxonomyHierarchy.maximumDepth {
+            destinationParent = target
+        } else {
+            destinationParent = TaxonomyHierarchy.parentPath(of: target)
+        }
+
+        let proposedRoot = TaxonomyHierarchy.path(parent: destinationParent, name: TaxonomyHierarchy.leafName(of: source))
+        guard !proposedRoot.isEmpty, TaxonomyHierarchy.depth(of: proposedRoot) + deepestRelativeDepth - 1 <= TaxonomyHierarchy.maximumDepth else {
+            return
+        }
+
+        let newRoot = uniqueTaxonomyPath(proposedRoot, kind: kind, excludingPrefix: source)
+        guard newRoot != source else { return }
+        replaceTaxonomyPrefix(kind: kind, oldPrefix: source, newPrefix: newRoot)
+        syncTaxonomies()
+        save()
+    }
+
     func renameTag(oldName: String, newName: String) {
-        let oldTrimmed = oldName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let newTrimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let oldTrimmed = TaxonomyHierarchy.normalizedPath(oldName)
+        let newTrimmed = TaxonomyHierarchy.normalizedPath(newName)
         guard !oldTrimmed.isEmpty, !newTrimmed.isEmpty, oldTrimmed != newTrimmed else { return }
         guard tags.contains(oldTrimmed) else { return }
         guard !tags.contains(newTrimmed) else { return }
@@ -452,17 +678,21 @@ final class LibraryStore: ObservableObject {
         if let color = tagColorHexes.removeValue(forKey: oldTrimmed) {
             tagColorHexes[newTrimmed] = color
         }
+        if let metadata = tagMetadata.removeValue(forKey: oldTrimmed) {
+            tagMetadata[newTrimmed] = metadata
+        }
 
         syncTaxonomies()
         save()
     }
 
     func deleteTag(named name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = TaxonomyHierarchy.normalizedPath(name)
         guard !trimmed.isEmpty else { return }
 
         tags.removeAll { $0 == trimmed }
         tagColorHexes.removeValue(forKey: trimmed)
+        tagMetadata.removeValue(forKey: trimmed)
 
         for index in papers.indices {
             var paper = papers[index]
@@ -477,31 +707,105 @@ final class LibraryStore: ObservableObject {
     }
 
     func setTagColor(hex: String?, forTag name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = TaxonomyHierarchy.normalizedPath(name)
         guard !trimmed.isEmpty else { return }
         guard tags.contains(trimmed) else { return }
 
         let normalized = hex?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let normalized, !normalized.isEmpty {
             tagColorHexes[trimmed] = normalized
+            var metadata = tagMetadata[trimmed] ?? TaxonomyItemMetadata(iconSystemName: "circle.fill")
+            metadata.colorHex = normalized
+            tagMetadata[trimmed] = metadata
         } else {
             tagColorHexes.removeValue(forKey: trimmed)
+            if var metadata = tagMetadata[trimmed] {
+                metadata.colorHex = ""
+                tagMetadata[trimmed] = metadata
+            }
         }
         save()
     }
 
     func tagColorHex(forTag name: String) -> String? {
-        tagColorHexes[name]
+        let normalized = TaxonomyHierarchy.normalizedPath(name)
+        if let hex = tagMetadata[normalized]?.colorHex.trimmingCharacters(in: .whitespacesAndNewlines),
+           !hex.isEmpty {
+            return hex
+        }
+        return tagColorHexes[normalized]
+    }
+
+    func taxonomyMetadata(for path: String, kind: TaxonomyKind) -> TaxonomyItemMetadata {
+        let normalized = TaxonomyHierarchy.normalizedPath(path)
+        switch kind {
+        case .collection:
+            return collectionMetadata[normalized] ?? TaxonomyItemMetadata(iconSystemName: "folder")
+        case .tag:
+            let legacyColor = tagColorHexes[normalized] ?? ""
+            var metadata = tagMetadata[normalized] ?? TaxonomyItemMetadata(iconSystemName: "circle.fill")
+            if metadata.colorHex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                metadata.colorHex = legacyColor
+            }
+            return metadata
+        }
+    }
+
+    @discardableResult
+    func updateTaxonomyItem(
+        kind: TaxonomyKind,
+        path: String,
+        title: String,
+        metadata: TaxonomyItemMetadata
+    ) -> String? {
+        let oldPath = TaxonomyHierarchy.normalizedPath(path)
+        let newTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !oldPath.isEmpty, !newTitle.isEmpty else { return nil }
+        guard taxonomyItems(for: kind).contains(oldPath) else { return nil }
+
+        let proposedPath = TaxonomyHierarchy.path(parent: TaxonomyHierarchy.parentPath(of: oldPath), name: newTitle)
+        let destination = proposedPath == oldPath
+            ? oldPath
+            : uniqueTaxonomyPath(proposedPath, kind: kind, excludingPrefix: oldPath)
+        guard !destination.isEmpty else { return nil }
+
+        if destination != oldPath {
+            replaceTaxonomyPrefix(kind: kind, oldPrefix: oldPath, newPrefix: destination)
+        }
+        setTaxonomyMetadata(metadata, for: destination, kind: kind)
+        syncTaxonomies()
+        save()
+        return destination
+    }
+
+    func setTaxonomyMetadata(_ metadata: TaxonomyItemMetadata, for path: String, kind: TaxonomyKind) {
+        let normalized = TaxonomyHierarchy.normalizedPath(path)
+        guard !normalized.isEmpty else { return }
+        switch kind {
+        case .collection:
+            collectionMetadata[normalized] = metadata
+        case .tag:
+            tagMetadata[normalized] = metadata
+            let color = metadata.colorHex.trimmingCharacters(in: .whitespacesAndNewlines)
+            if color.isEmpty {
+                tagColorHexes.removeValue(forKey: normalized)
+            } else {
+                tagColorHexes[normalized] = color
+            }
+        }
     }
 
     func renameCollection(oldName: String, newName: String) {
-        let oldTrimmed = oldName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let newTrimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let oldTrimmed = TaxonomyHierarchy.normalizedPath(oldName)
+        let newTrimmed = TaxonomyHierarchy.normalizedPath(newName)
         guard !oldTrimmed.isEmpty, !newTrimmed.isEmpty, oldTrimmed != newTrimmed else { return }
         guard collections.contains(oldTrimmed) else { return }
         guard !collections.contains(newTrimmed) else { return }
 
         collections = collections.map { $0 == oldTrimmed ? newTrimmed : $0 }.uniquedAndSorted()
+        if let metadata = collectionMetadata.removeValue(forKey: oldTrimmed) {
+            collectionMetadata[newTrimmed] = metadata
+        }
 
         for index in papers.indices {
             var paper = papers[index]
@@ -516,10 +820,11 @@ final class LibraryStore: ObservableObject {
     }
 
     func deleteCollection(named name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = TaxonomyHierarchy.normalizedPath(name)
         guard !trimmed.isEmpty else { return }
 
         collections.removeAll { $0 == trimmed }
+        collectionMetadata.removeValue(forKey: trimmed)
 
         for index in papers.indices {
             var paper = papers[index]
@@ -538,7 +843,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func setCollection(_ name: String, assigned: Bool, forPaperIDs paperIDs: [UUID]) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = TaxonomyHierarchy.normalizedPath(name)
         guard !trimmed.isEmpty else { return }
         let perfStart = PerformanceMonitor.now()
 
@@ -592,7 +897,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func setTag(_ name: String, assigned: Bool, forPaperIDs paperIDs: [UUID]) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = TaxonomyHierarchy.normalizedPath(name)
         guard !trimmed.isEmpty else { return }
         let perfStart = PerformanceMonitor.now()
 
@@ -642,15 +947,82 @@ final class LibraryStore: ObservableObject {
     }
 
     func removePaper(id: UUID) {
+        movePaperToRecentlyDeleted(id: id)
+    }
+
+    func movePaperToRecentlyDeleted(id: UUID) {
         guard let index = indexOfPaper(id: id) else { return }
-        let paper = papers.remove(at: index)
+        guard papers[index].deletedAt == nil else { return }
+        var paper = papers[index]
+        paper.deletedAt = .now
+        paper.lastEditedAtMilliseconds = Paper.currentTimestampMilliseconds()
+        papers[index] = paper
+        syncTaxonomies()
+        save()
+    }
+
+    func restorePaper(id: UUID) {
+        guard let index = indexOfPaper(id: id) else { return }
+        guard papers[index].deletedAt != nil else { return }
+        var paper = papers[index]
+        paper.deletedAt = nil
+        paper.lastEditedAtMilliseconds = Paper.currentTimestampMilliseconds()
+        papers[index] = paper
+        syncTaxonomies()
+        save()
+    }
+
+    func permanentlyDeletePaper(id: UUID) {
+        permanentlyDeletePapers(ids: [id])
+    }
+
+    func permanentlyDeletePapers(ids: [UUID]) {
+        let targetIDs = Set(ids)
+        guard !targetIDs.isEmpty else { return }
+
+        let papersToDelete = papers.filter { targetIDs.contains($0.id) && $0.isDeleted }
+        guard !papersToDelete.isEmpty else { return }
+
+        for paper in papersToDelete {
+            deleteStoredAssets(for: paper)
+        }
+
+        let deletedIDs = Set(papersToDelete.map(\.id))
+        papers.removeAll { deletedIDs.contains($0.id) }
+        syncTaxonomies()
+        save()
+    }
+
+    @discardableResult
+    func purgeExpiredDeletedPapers(now: Date = .now) -> Int {
+        let cutoff = now.addingTimeInterval(-settings.resolvedRecentlyDeletedRetentionInterval)
+        let expiredIDs = papers.compactMap { paper -> UUID? in
+            guard let deletedAt = paper.deletedAt, deletedAt <= cutoff else { return nil }
+            return paper.id
+        }
+        guard !expiredIDs.isEmpty else { return 0 }
+
+        permanentlyDeletePapers(ids: expiredIDs)
+        return expiredIDs.count
+    }
+
+    private func startRecentlyDeletedCleanupTask() {
+        recentlyDeletedCleanupTask?.cancel()
+        recentlyDeletedCleanupTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 3_600_000_000_000)
+                guard !Task.isCancelled else { break }
+                self?.purgeExpiredDeletedPapers()
+            }
+        }
+    }
+
+    private func deleteStoredAssets(for paper: Paper) {
         if let folderURL = paperDirectoryURL(for: paper) {
             try? fileManager.removeItem(at: folderURL)
         } else if let pdfURL = pdfURL(for: paper) {
             try? fileManager.removeItem(at: pdfURL)
         }
-        syncTaxonomies()
-        save()
     }
 
     func pdfURL(for paper: Paper) -> URL? {
@@ -658,7 +1030,9 @@ final class LibraryStore: ObservableObject {
     }
 
     func defaultOpenPDFURL(for paper: Paper) -> URL? {
-        resolvedPreferredOpenPDFURL(for: paper) ?? resolvedPDFURL(for: paper)
+        translatedPreferredPDFURL(for: paper)
+            ?? resolvedPreferredOpenPDFURL(for: paper)
+            ?? resolvedPDFURL(for: paper)
     }
 
     func availablePDFFileNames(for paper: Paper) -> [String] {
@@ -688,9 +1062,124 @@ final class LibraryStore: ObservableObject {
         return true
     }
 
+    @discardableResult
+    func attachPDF(to paperID: UUID, from url: URL, originalFileName: String? = nil) -> Bool {
+        attachFile(to: paperID, from: url, originalFileName: originalFileName)
+    }
+
+    @discardableResult
+    func attachFile(to paperID: UUID, from url: URL, originalFileName: String? = nil) -> Bool {
+        guard let index = indexOfPaper(id: paperID) else { return false }
+
+        do {
+            var paper = papers[index]
+            let folderURL = try ensurePaperDirectory(for: &paper)
+            let preferredName = originalFileName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let sourceName = preferredName?.isEmpty == false ? preferredName! : url.lastPathComponent
+            let safeName = sanitizeFileName(sourceName)
+            let destinationURL = uniqueAssetDestinationURL(in: folderURL, preferredFileName: safeName)
+            try fileManager.copyItem(at: url, to: destinationURL)
+            ensureEditablePDF(at: destinationURL)
+
+            paper.storedPDFFileName = destinationURL.lastPathComponent
+            paper.originalPDFFileName = sourceName
+            paper.preferredOpenPDFFileName = destinationURL.lastPathComponent
+            paper.lastEditedAtMilliseconds = Paper.currentTimestampMilliseconds()
+            papers[index] = paper
+            save()
+            return true
+        } catch {
+            NSSound.beep()
+            print("添加附件失败: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func replaceDefaultAttachment(for paperID: UUID, with url: URL, originalFileName: String? = nil) -> Bool {
+        guard let index = indexOfPaper(id: paperID) else { return false }
+
+        do {
+            var paper = papers[index]
+            let existingURL = defaultOpenPDFURL(for: paper)
+            let folderURL = try ensurePaperDirectory(for: &paper)
+            let preferredName = originalFileName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let sourceName = preferredName?.isEmpty == false ? preferredName! : url.lastPathComponent
+            let safeName = sanitizeFileName(sourceName)
+            let destinationURL = uniqueAssetDestinationURL(in: folderURL, preferredFileName: safeName)
+
+            try fileManager.copyItem(at: url, to: destinationURL)
+            ensureEditablePDF(at: destinationURL)
+
+            if let existingURL,
+               fileManager.fileExists(atPath: existingURL.path),
+               existingURL.standardizedFileURL != url.standardizedFileURL,
+               existingURL.standardizedFileURL != destinationURL.standardizedFileURL {
+                ensureEditablePDF(at: existingURL)
+                try fileManager.removeItem(at: existingURL)
+            }
+
+            paper.storedPDFFileName = destinationURL.lastPathComponent
+            paper.originalPDFFileName = sourceName
+            paper.preferredOpenPDFFileName = destinationURL.lastPathComponent
+            paper.lastEditedAtMilliseconds = Paper.currentTimestampMilliseconds()
+            papers[index] = paper
+            save()
+            return true
+        } catch {
+            NSSound.beep()
+            print("替换附件失败: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func ensurePaperDirectory(for paperID: UUID) -> URL? {
+        guard let index = indexOfPaper(id: paperID) else { return nil }
+        do {
+            var paper = papers[index]
+            let folderURL = try ensurePaperDirectory(for: &paper)
+            papers[index] = paper
+            save()
+            return folderURL
+        } catch {
+            NSSound.beep()
+            print("创建条目文件夹失败: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
     func hasExistingPDFAttachment(for paper: Paper) -> Bool {
-        guard let url = resolvedPDFURL(for: paper) else { return false }
-        return fileManager.fileExists(atPath: url.path)
+        // Use pre-computed cache when available to avoid filesystem I/O.
+        if let cached = attachmentPresenceCache[paper.id] {
+            return !cached.isMissing
+        }
+        return !attachmentURLs(for: paper).isEmpty
+    }
+
+    func attachmentURLs(for paper: Paper) -> [URL] {
+        var urls: [URL] = []
+        var seenPaths: Set<String> = []
+
+        func appendIfExistingAttachment(_ url: URL) {
+            let fileName = url.lastPathComponent
+            guard !isInternalPaperFileName(fileName),
+                  fileManager.fileExists(atPath: url.path) else {
+                return
+            }
+            let key = url.standardizedFileURL.path
+            guard seenPaths.insert(key).inserted else { return }
+            urls.append(url)
+        }
+
+        for url in availablePDFURLs(for: paper) {
+            appendIfExistingAttachment(url)
+        }
+        for url in imageURLs(for: paper) {
+            appendIfExistingAttachment(url)
+        }
+
+        return urls
     }
 
     func paperDirectoryURL(for paper: Paper) -> URL? {
@@ -698,6 +1187,26 @@ final class LibraryStore: ObservableObject {
             return nil
         }
         return papersDirectory.appendingPathComponent(storageFolderName, isDirectory: true)
+    }
+
+    private func ensurePaperDirectory(for paper: inout Paper) throws -> URL {
+        try ensureStorageDirectories()
+
+        let folderURL: URL
+        if let existingFolderURL = paperDirectoryURL(for: paper) {
+            folderURL = existingFolderURL
+        } else {
+            let folderName = UUID().uuidString
+            folderURL = papersDirectory.appendingPathComponent(folderName, isDirectory: true)
+            paper.storageFolderName = folderName
+        }
+
+        try fileManager.createDirectory(at: folderURL, withIntermediateDirectories: true)
+        _ = try ensureImagesDirectoryExists(at: folderURL)
+        if !fileManager.fileExists(atPath: canonicalNoteURL(in: folderURL).path) {
+            try paper.notes.write(to: canonicalNoteURL(in: folderURL), atomically: true, encoding: .utf8)
+        }
+        return folderURL
     }
 
     func noteURL(for paper: Paper) -> URL? {
@@ -717,10 +1226,71 @@ final class LibraryStore: ObservableObject {
         guard let folderURL = paperDirectoryURL(for: paper) else {
             return []
         }
-        return paper.imageFileNames.map { imageFileName in
-            existingImageURL(named: imageFileName, in: folderURL)
+        return paper.imageFileNames.compactMap { imageFileName in
+            let url = existingImageURL(named: imageFileName, in: folderURL)
                 ?? canonicalImageURL(named: imageFileName, in: folderURL)
+            guard supportedImageExtensions.contains(url.pathExtension.lowercased()) else {
+                return nil
+            }
+            return url
         }
+    }
+
+    func localMetadataSuggestion(for paper: Paper) -> MetadataSuggestion? {
+        guard let url = pdfURL(for: paper),
+              url.pathExtension.lowercased() == "pdf" else {
+            return nil
+        }
+
+        let metadata = extractPDFCoreMetadata(from: url)
+        let titleHasHan = containsHanCharacters(metadata.title)
+        let authorsHasHan = containsHanCharacters(metadata.authors)
+        let suggestion = MetadataSuggestion(
+            title: metadata.title,
+            englishTitle: titleHasHan ? "" : metadata.title,
+            authors: metadata.authors,
+            authorsEnglish: authorsHasHan ? "" : metadata.authors,
+            year: metadata.year,
+            source: metadata.source,
+            doi: metadata.doi,
+            abstractText: metadata.abstractText,
+            chineseAbstract: containsHanCharacters(metadata.abstractText) ? metadata.abstractText : "",
+            volume: metadata.volume,
+            issue: metadata.issue,
+            pages: metadata.pages,
+            paperType: metadata.paperType
+        ).normalized()
+
+        let fields: [MetadataField] = [
+            .title, .englishTitle, .authors, .authorsEnglish, .year, .source, .doi,
+            .abstractText, .chineseAbstract, .volume, .issue, .pages, .paperType
+        ]
+        guard fields.contains(where: {
+            !MetadataValueNormalizer.normalize($0.value(in: suggestion), for: $0)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
+        }) else {
+            return nil
+        }
+        return suggestion
+    }
+
+    private func attachmentPresenceSignature(for paper: Paper) -> String {
+        [
+            paper.storageFolderName ?? "",
+            paper.storedPDFFileName ?? "",
+            paper.originalPDFFileName ?? "",
+            paper.preferredOpenPDFFileName ?? "",
+            paper.imageFileNames.joined(separator: "\u{1F}")
+        ]
+        .joined(separator: "\u{1E}")
+    }
+
+    private func isInternalPaperFileName(_ fileName: String) -> Bool {
+        fileName == canonicalNoteFileName
+            || fileName == legacyNoteFileName
+            || fileName == imagesDirectoryName
+            || fileName.hasPrefix(".")
     }
 
     func imageDirectoryURL(for paper: Paper) -> URL? {
@@ -795,15 +1365,17 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    func removeImage(from paperID: UUID, fileName: String) {
-        guard let index = indexOfPaper(id: paperID) else { return }
+    @discardableResult
+    func removeImage(from paperID: UUID, fileName: String) -> Bool {
+        guard let index = indexOfPaper(id: paperID) else { return false }
         var paper = papers[index]
-        guard let imageURL = imageURL(for: paper, fileName: fileName) else { return }
+        guard let imageURL = imageURL(for: paper, fileName: fileName) else { return false }
         try? fileManager.removeItem(at: imageURL)
         paper.imageFileNames.removeAll(where: { $0 == fileName })
         paper.lastEditedAtMilliseconds = Paper.currentTimestampMilliseconds()
         papers[index] = paper
         save()
+        return true
     }
 
     func revealImage(for paperID: UUID, fileName: String) {
@@ -837,7 +1409,19 @@ final class LibraryStore: ObservableObject {
         guard let currentURL = pdfURL(for: paper) else { return false }
         guard fileManager.fileExists(atPath: currentURL.path) else { return false }
 
-        let targetFileName = preferredPDFFileName(for: paper)
+        let targetFileName: String = {
+            let base = preferredPDFFileName(for: paper)
+            let currentStem = currentURL.deletingPathExtension().lastPathComponent
+            // Preserve translation suffixes (-dual, -zh, -en) when renaming PDFs.
+            // The base file name is generated from metadata which doesn't include these suffixes.
+            let knownSuffixes = ["-dual", "-zh", "-en"]
+            for suffix in knownSuffixes {
+                if currentStem.hasSuffix(suffix) {
+                    return base.replacingOccurrences(of: ".pdf", with: "\(suffix).pdf")
+                }
+            }
+            return base
+        }()
         guard !targetFileName.isEmpty else { return false }
         guard targetFileName != paper.storedPDFFileName else { return false }
 
@@ -923,6 +1507,8 @@ final class LibraryStore: ObservableObject {
             return sidebarCountSnapshot.missingDOI
         case .library(.missingAttachment):
             return sidebarCountSnapshot.missingAttachment
+        case .library(.recentlyDeleted):
+            return sidebarCountSnapshot.recentlyDeleted
         case .collection(let name):
             return sidebarCountSnapshot.collections[name] ?? 0
         case .tag(let name):
@@ -936,38 +1522,7 @@ final class LibraryStore: ObservableObject {
         searchField: AdvancedSearchField? = nil
     ) -> [Paper] {
         let perfStart = PerformanceMonitor.now()
-        let base: [Paper]
-
-        switch selection {
-        case .library(.all):
-            base = papers
-        case .library(.recentReading):
-            let cutoff = Date().addingTimeInterval(-settings.recentReadingRange.interval)
-            base = papers.filter { paper in
-                guard let lastOpenedAt = paper.lastOpenedAt else {
-                    return false
-                }
-                return lastOpenedAt >= cutoff
-            }
-        case .library(.zombiePapers):
-            let cutoff = Date().addingTimeInterval(-settings.resolvedZombiePapersInterval)
-            base = papers.filter { paper in
-                guard paper.addedAtDate <= cutoff else { return false }
-                guard let editedAt = paper.editedAtDate else { return true }
-                return editedAt < cutoff
-            }
-        case .library(.unfiled):
-            base = papersForStableSelection(.library(.unfiled))
-        case .library(.missingDOI):
-            base = papersForStableSelection(.library(.missingDOI))
-        case .library(.missingAttachment):
-            ensureAttachmentPresenceSnapshotFresh()
-            base = papersForStableSelection(.library(.missingAttachment))
-        case .collection(let name):
-            base = papersForStableSelection(.collection(name))
-        case .tag(let name):
-            base = papersForStableSelection(.tag(name))
-        }
+        let base = scopedPapers(for: selection)
 
         let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         if let searchField {
@@ -1032,6 +1587,46 @@ final class LibraryStore: ObservableObject {
         return result
     }
 
+    func scopedPapers(for selection: SidebarSelection) -> [Paper] {
+        switch selection {
+        case .library(.all):
+            return papersForStableSelection(.library(.all))
+        case .library(.recentReading):
+            let cutoff = Date().addingTimeInterval(-settings.recentReadingRange.interval)
+            return papers.filter { paper in
+                guard !paper.isDeleted else { return false }
+                guard let lastOpenedAt = paper.lastOpenedAt else {
+                    return false
+                }
+                return lastOpenedAt >= cutoff
+            }
+        case .library(.zombiePapers):
+            let cutoff = Date().addingTimeInterval(-settings.resolvedZombiePapersInterval)
+            return papers.filter { paper in
+                guard !paper.isDeleted else { return false }
+                guard paper.addedAtDate <= cutoff else { return false }
+                guard let editedAt = paper.editedAtDate else { return true }
+                return editedAt < cutoff
+            }
+        case .library(.unfiled):
+            return papersForStableSelection(.library(.unfiled))
+        case .library(.missingDOI):
+            return papersForStableSelection(.library(.missingDOI))
+        case .library(.missingAttachment):
+            ensureAttachmentPresenceSnapshotFresh()
+            return papersForStableSelection(.library(.missingAttachment))
+        case .library(.recentlyDeleted):
+            return papersForStableSelection(.library(.recentlyDeleted))
+                .sorted {
+                    ($0.deletedAt ?? .distantPast) > ($1.deletedAt ?? .distantPast)
+                }
+        case .collection(let name):
+            return papersForStableSelection(.collection(name))
+        case .tag(let name):
+            return papersForStableSelection(.tag(name))
+        }
+    }
+
     private func indexOfPaper(id: UUID) -> Int? {
         if let cached = paperIndexByID[id],
            papers.indices.contains(cached),
@@ -1078,61 +1673,33 @@ final class LibraryStore: ObservableObject {
     private func ensureDynamicLibraryCountsFresh() {
         let current = DynamicCountConfig(
             recentReadingInterval: settings.recentReadingRange.interval,
-            zombieInterval: settings.resolvedZombiePapersInterval
+            zombieInterval: settings.resolvedZombiePapersInterval,
+            recentlyDeletedRetentionInterval: settings.resolvedRecentlyDeletedRetentionInterval
         )
         guard current != lastDynamicCountConfig else { return }
         recomputeSidebarCountSnapshot()
     }
 
     private func matchesPlainText(_ query: String, in paper: Paper) -> Bool {
-        if paperTextContainsQuery(query, in: paper.title)
-            || paperTextContainsQuery(query, in: paper.englishTitle)
-            || paperTextContainsQuery(query, in: paper.authors)
-            || paperTextContainsQuery(query, in: paper.authorsEnglish)
-            || paperTextContainsQuery(query, in: paper.year)
-            || paperTextContainsQuery(query, in: paper.source)
-            || paperTextContainsQuery(query, in: paper.doi)
-            || paperTextContainsQuery(query, in: paper.tagsSortKey)
-            || paperTextContainsQuery(query, in: paper.paperType)
-            || paperTextContainsQuery(query, in: paper.volume)
-            || paperTextContainsQuery(query, in: paper.issue)
-            || paperTextContainsQuery(query, in: paper.pages)
-            || paperTextContainsQuery(query, in: paper.category)
-            || paperTextContainsQuery(query, in: paper.impactFactor)
-            || paperTextContainsQuery(query, in: paper.country)
-            || paperTextContainsQuery(query, in: paper.keywords)
-            || paperTextContainsQuery(query, in: paper.abstractText)
-            || paperTextContainsQuery(query, in: paper.notes)
-            || paperTextContainsQuery(query, in: paper.rqs)
-            || paperTextContainsQuery(query, in: paper.conclusion)
-            || paperTextContainsQuery(query, in: paper.results)
-            || paperTextContainsQuery(query, in: paper.samples)
-            || paperTextContainsQuery(query, in: paper.participantType)
-            || paperTextContainsQuery(query, in: paper.variables)
-            || paperTextContainsQuery(query, in: paper.dataCollection)
-            || paperTextContainsQuery(query, in: paper.dataAnalysis)
-            || paperTextContainsQuery(query, in: paper.methodology)
-            || paperTextContainsQuery(query, in: paper.theoreticalFoundation)
-            || paperTextContainsQuery(query, in: paper.educationalLevel)
-            || paperTextContainsQuery(query, in: paper.limitations) {
-            return true
-        }
-
-        for collection in paper.collections where paperTextContainsQuery(query, in: collection) {
-            return true
-        }
-
-        for tag in paper.tags where paperTextContainsQuery(query, in: tag) {
-            return true
-        }
-
-        return false
+        paperTextContainsQuery(query, in: paper.searchIndexBlob)
     }
 
     private func paperTextContainsQuery(_ query: String, in source: String) -> Bool {
         guard !query.isEmpty, !source.isEmpty else { return false }
-        return source.range(
+        if source.range(
             of: query,
+            options: [.caseInsensitive, .diacriticInsensitive]
+        ) != nil {
+            return true
+        }
+
+        let normalizedQuery = AuthorNameParser.normalizedToken(from: query)
+        guard !normalizedQuery.isEmpty else { return false }
+        let normalizedSource = AuthorNameParser.normalizedToken(from: source)
+        guard !normalizedSource.isEmpty else { return false }
+
+        return normalizedSource.range(
+            of: normalizedQuery,
             options: [.caseInsensitive, .diacriticInsensitive]
         ) != nil
     }
@@ -1141,19 +1708,20 @@ final class LibraryStore: ObservableObject {
         let perfStart = PerformanceMonitor.now()
         let dynamicConfig = DynamicCountConfig(
             recentReadingInterval: settings.recentReadingRange.interval,
-            zombieInterval: settings.resolvedZombiePapersInterval
+            zombieInterval: settings.resolvedZombiePapersInterval,
+            recentlyDeletedRetentionInterval: settings.resolvedRecentlyDeletedRetentionInterval
         )
         let now = Date()
         let recentReadingCutoff = now.addingTimeInterval(-dynamicConfig.recentReadingInterval)
         let zombieCutoff = now.addingTimeInterval(-dynamicConfig.zombieInterval)
 
         var snapshot = SidebarCountSnapshot.empty
-        snapshot.all = papers.count
         var nextStableSelectionPaperIDs: [SidebarSelection: [UUID]] = [
             .library(.all): [],
             .library(.unfiled): [],
             .library(.missingDOI): [],
-            .library(.missingAttachment): []
+            .library(.missingAttachment): [],
+            .library(.recentlyDeleted): []
         ]
         var nextPaperIndexByID: [UUID: Int] = [:]
         nextPaperIndexByID.reserveCapacity(papers.count)
@@ -1162,6 +1730,14 @@ final class LibraryStore: ObservableObject {
 
         for (index, paper) in papers.enumerated() {
             nextPaperIndexByID[paper.id] = index
+
+            if paper.isDeleted {
+                snapshot.recentlyDeleted += 1
+                nextStableSelectionPaperIDs[.library(.recentlyDeleted), default: []].append(paper.id)
+                continue
+            }
+
+            snapshot.all += 1
             nextStableSelectionPaperIDs[.library(.all), default: []].append(paper.id)
 
             if let lastOpenedAt = paper.lastOpenedAt,
@@ -1189,20 +1765,17 @@ final class LibraryStore: ObservableObject {
                 nextStableSelectionPaperIDs[.library(.missingDOI), default: []].append(paper.id)
             }
 
-            let pdfPath = pdfURL(for: paper)?.path
+            let attachmentSignature = attachmentPresenceSignature(for: paper)
             let hasMissingAttachment: Bool
             if !forceAttachmentRevalidation,
                let cached = attachmentPresenceCache[paper.id],
-               cached.pdfPath == pdfPath {
+               cached.signature == attachmentSignature {
                 hasMissingAttachment = cached.isMissing
             } else {
-                hasMissingAttachment = {
-                    guard let pdfPath else { return true }
-                    return !fileManager.fileExists(atPath: pdfPath)
-                }()
+                hasMissingAttachment = attachmentURLs(for: paper).isEmpty
             }
             nextAttachmentPresenceCache[paper.id] = AttachmentPresenceCacheEntry(
-                pdfPath: pdfPath,
+                signature: attachmentSignature,
                 isMissing: hasMissingAttachment
             )
             if hasMissingAttachment {
@@ -1259,6 +1832,8 @@ final class LibraryStore: ObservableObject {
             collections = snapshot.collections
             tags = snapshot.tags
             tagColorHexes = snapshot.tagColorHexes
+            collectionMetadata = snapshot.collectionMetadata
+            tagMetadata = snapshot.tagMetadata
             if didNormalizeStoredState {
                 save()
             }
@@ -1268,10 +1843,25 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    func suspendAutoSave() {
+        autoSaveSuspended = true
+    }
+
+    func resumeAutoSave() {
+        autoSaveSuspended = false
+        // Flush any pending write that was skipped during suspension
+        if pendingSaveTask != nil {
+            flushPendingSaveNow()
+        }
+    }
+
     private func save() {
+        // When in background, extend debounce to 2 s to reduce I/O pressure.
+        let delay: UInt64 = autoSaveSuspended ? 2_000_000_000 : 220_000_000
         pendingSaveTask?.cancel()
         pendingSaveTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 220_000_000)
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled else { return }
             flushPendingSaveNow()
         }
     }
@@ -1286,7 +1876,9 @@ final class LibraryStore: ObservableObject {
                 papers: persistedPapersForLibraryStorage(),
                 collections: collections,
                 tags: tags,
-                tagColorHexes: tagColorHexes
+                tagColorHexes: tagColorHexes,
+                collectionMetadata: collectionMetadata,
+                tagMetadata: tagMetadata
             )
             let data = try encoder.encode(snapshot)
             try data.write(to: libraryFileURL, options: .atomic)
@@ -1302,22 +1894,124 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    private func taxonomyItems(for kind: TaxonomyKind) -> [String] {
+        switch kind {
+        case .collection:
+            return collections
+        case .tag:
+            return tags
+        }
+    }
+
+    private func setTaxonomyItems(_ items: [String], for kind: TaxonomyKind) {
+        switch kind {
+        case .collection:
+            collections = items
+        case .tag:
+            tags = items
+        }
+    }
+
+    private func replaceTaxonomyPrefix(kind: TaxonomyKind, oldPrefix: String, newPrefix: String) {
+        let remap: (String) -> String = { value in
+            guard TaxonomyHierarchy.isDescendant(value, of: oldPrefix) else { return value }
+            if value == oldPrefix {
+                return newPrefix
+            }
+            let suffix = value.dropFirst(oldPrefix.count + TaxonomyHierarchy.separator.count)
+            return "\(newPrefix)\(TaxonomyHierarchy.separator)\(suffix)"
+        }
+
+        switch kind {
+        case .collection:
+            collections = collections.map(remap).uniquedAndSorted()
+            collectionMetadata = remappedTaxonomyMetadata(collectionMetadata, using: remap)
+            for index in papers.indices {
+                var paper = papers[index]
+                let updated = paper.collections.map(remap).uniquedAndSorted()
+                if updated != paper.collections {
+                    paper.collections = updated
+                    papers[index] = paper
+                }
+            }
+        case .tag:
+            tags = tags.map(remap).uniquedAndSorted()
+            tagMetadata = remappedTaxonomyMetadata(tagMetadata, using: remap)
+            for index in papers.indices {
+                var paper = papers[index]
+                let updated = paper.tags.map(remap).uniquedAndSorted()
+                if updated != paper.tags {
+                    paper.tags = updated
+                    papers[index] = paper
+                }
+            }
+
+            var nextColors: [String: String] = [:]
+            for (tag, color) in tagColorHexes {
+                nextColors[remap(tag)] = color
+            }
+            tagColorHexes = nextColors
+        }
+    }
+
+    private func remappedTaxonomyMetadata(
+        _ metadata: [String: TaxonomyItemMetadata],
+        using remap: (String) -> String
+    ) -> [String: TaxonomyItemMetadata] {
+        var next: [String: TaxonomyItemMetadata] = [:]
+        for (path, value) in metadata {
+            next[remap(path)] = value
+        }
+        return next
+    }
+
+    private func uniqueTaxonomyPath(_ proposedPath: String, kind: TaxonomyKind, excludingPrefix: String? = nil) -> String {
+        let existing = Set(
+            taxonomyItems(for: kind).filter { item in
+                guard let excludingPrefix else { return true }
+                return !TaxonomyHierarchy.isDescendant(item, of: excludingPrefix)
+            }
+        )
+        guard existing.contains(proposedPath) else { return proposedPath }
+
+        let parent = TaxonomyHierarchy.parentPath(of: proposedPath)
+        let leaf = TaxonomyHierarchy.leafName(of: proposedPath)
+        for index in 2...999 {
+            let candidate = TaxonomyHierarchy.path(parent: parent, name: "\(leaf) \(index)")
+            if !existing.contains(candidate) {
+                return candidate
+            }
+        }
+        return proposedPath
+    }
+
     private func syncTaxonomies() {
-        let usedCollections = papers
+        let activePapers = papers.filter { !$0.isDeleted }
+
+        let usedCollections = activePapers
             .flatMap(\.collections)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .map(TaxonomyHierarchy.normalizedPath)
             .filter { !$0.isEmpty }
             .uniquedAndSorted()
 
-        let usedTags = papers
+        let usedTags = activePapers
             .flatMap(\.tags)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .map(TaxonomyHierarchy.normalizedPath)
             .filter { !$0.isEmpty }
             .uniquedAndSorted()
 
-        collections = (collections + usedCollections).uniquedAndSorted()
-        tags = (tags + usedTags).uniquedAndSorted()
+        let collectionAncestors = usedCollections.flatMap { TaxonomyHierarchy.ancestors(of: $0) }
+        let tagAncestors = usedTags.flatMap { TaxonomyHierarchy.ancestors(of: $0) }
+        collections = (collections.map(TaxonomyHierarchy.normalizedPath) + usedCollections + collectionAncestors)
+            .filter { !$0.isEmpty }
+            .uniquedAndSorted()
+        tags = (tags.map(TaxonomyHierarchy.normalizedPath) + usedTags + tagAncestors)
+            .filter { !$0.isEmpty }
+            .uniquedAndSorted()
+        let validCollections = Set(collections)
         let validTags = Set(tags)
+        collectionMetadata = collectionMetadata.filter { validCollections.contains($0.key) }
+        tagMetadata = tagMetadata.filter { validTags.contains($0.key) }
         tagColorHexes = tagColorHexes.filter { validTags.contains($0.key) }
     }
 
@@ -1458,6 +2152,7 @@ final class LibraryStore: ObservableObject {
         let volume = (entry.fields["volume"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let issue = (entry.fields["number"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let pages = (entry.fields["pages"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let webPageURL = (entry.fields["url"] ?? entry.fields["URL"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let type = mappedPaperType(from: entry.type)
 
         return Paper(
@@ -1467,11 +2162,13 @@ final class LibraryStore: ObservableObject {
             source: source,
             doi: doi,
             abstractText: abstractText,
+            chineseAbstract: containsHanCharacters(abstractText) ? abstractText : "",
             notes: "",
             paperType: type,
             volume: volume,
             issue: issue,
             pages: pages,
+            webPageURL: webPageURL,
             storageFolderName: nil,
             storedPDFFileName: nil,
             originalPDFFileName: nil,
@@ -1549,9 +2246,21 @@ final class LibraryStore: ObservableObject {
         tags = (tags + snapshot.tags).uniquedAndSorted()
 
         for (tag, colorHex) in snapshot.tagColorHexes {
-            let trimmedTag = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedTag = TaxonomyHierarchy.normalizedPath(tag)
             guard !trimmedTag.isEmpty else { continue }
             tagColorHexes[trimmedTag] = colorHex
+        }
+
+        for (collection, metadata) in snapshot.collectionMetadata {
+            let normalized = TaxonomyHierarchy.normalizedPath(collection)
+            guard !normalized.isEmpty else { continue }
+            collectionMetadata[normalized] = metadata
+        }
+
+        for (tag, metadata) in snapshot.tagMetadata {
+            let normalized = TaxonomyHierarchy.normalizedPath(tag)
+            guard !normalized.isEmpty else { continue }
+            tagMetadata[normalized] = metadata
         }
     }
 
@@ -1662,6 +2371,7 @@ final class LibraryStore: ObservableObject {
             doi: incoming.doi,
             notes: selection.includeNotes ? incoming.notes : "",
             paperType: incoming.paperType,
+            webPageURL: incoming.webPageURL,
             storageFolderName: nil,
             storedPDFFileName: nil,
             originalPDFFileName: nil,
@@ -1728,23 +2438,37 @@ final class LibraryStore: ObservableObject {
     }
 
     private func normalizedDOI(_ doi: String) -> String {
-        doi
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
+        normalizeDOIIdentifier(doi)
     }
 
-    private func isDuplicatePaper(title: String, doi: String) -> Bool {
-        let normalizedTitle = normalizedPaperTitle(title)
-        let normalizedDoi = normalizedDOI(doi)
-        return papers.contains { existing in
-            if !normalizedDoi.isEmpty && normalizedDOI(existing.doi) == normalizedDoi {
-                return true
-            }
-            if !normalizedTitle.isEmpty && normalizedPaperTitle(existing.title) == normalizedTitle {
-                return true
-            }
-            return false
+    private func duplicateTitleAuthorKey(title: String, authors: String) -> String {
+        let titleKey = normalizedPaperTitle(title)
+        let authorKey = normalizedAuthorList(authors)
+        guard !titleKey.isEmpty, !authorKey.isEmpty else { return "" }
+        return "\(titleKey)|\(authorKey)"
+    }
+
+    private func normalizedAuthorList(_ authors: String) -> String {
+        let parsed = AuthorNameParser.parse(raw: authors, dropEtAl: true)
+            .map(normalizedPaperTitle)
+            .filter { !$0.isEmpty && $0 != "unknown" && $0 != "未知" }
+            .sorted()
+
+        if !parsed.isEmpty {
+            return parsed.joined(separator: "|")
         }
+
+        let fallback = normalizedPaperTitle(authors)
+        guard fallback != "unknown", fallback != "未知" else { return "" }
+        return fallback
+    }
+
+    private func duplicateDisplayName(title: String, authors: String, doi: String) -> String {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = trimmedTitle.isEmpty ? "Untitled Paper" : trimmedTitle
+        let trimmedDOI = doi.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedDOI.isEmpty else { return base }
+        return "\(base) [\(trimmedDOI)]"
     }
 
     private func hasMetadataEdit(previous: Paper, updated: Paper) -> Bool {
@@ -1761,7 +2485,30 @@ final class LibraryStore: ObservableObject {
         var title: String = ""
         var authors: String = ""
         var year: String = ""
+        var source: String = ""
         var doi: String = ""
+        var abstractText: String = ""
+        var volume: String = ""
+        var issue: String = ""
+        var pages: String = ""
+        var paperType: String = ""
+    }
+
+    private func extractDocumentCoreMetadata(from url: URL) -> PDFCoreMetadata {
+        if url.pathExtension.lowercased() == "pdf" {
+            return extractPDFCoreMetadata(from: url)
+        }
+
+        var metadata = PDFCoreMetadata()
+        if let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey]) {
+            if let createdDate = values.creationDate {
+                metadata.year = yearString(from: createdDate)
+            } else if let modifiedDate = values.contentModificationDate {
+                metadata.year = yearString(from: modifiedDate)
+            }
+        }
+        metadata.source = detectSourceInFileName(url)
+        return metadata
     }
 
     private func extractPDFCoreMetadata(from url: URL) -> PDFCoreMetadata {
@@ -1771,47 +2518,76 @@ final class LibraryStore: ObservableObject {
 
         let attributes = document.documentAttributes ?? [:]
         var metadata = PDFCoreMetadata()
-
-        if let rawTitle = attributes[PDFDocumentAttribute.titleAttribute] as? String {
-            metadata.title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        if let rawAuthors = attributes[PDFDocumentAttribute.authorAttribute] as? String {
-            metadata.authors = rawAuthors.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        if let createdDate = attributes[PDFDocumentAttribute.creationDateAttribute] as? Date {
-            metadata.year = yearString(from: createdDate)
-        } else if let modifiedDate = attributes[PDFDocumentAttribute.modificationDateAttribute] as? Date {
-            metadata.year = yearString(from: modifiedDate)
-        }
+        let attributeTitle = MetadataValueNormalizer.normalizeTitle(
+            (attributes[PDFDocumentAttribute.titleAttribute] as? String) ?? ""
+        )
+        let attributeAuthors = MetadataValueNormalizer.normalizeAuthors(
+            (attributes[PDFDocumentAttribute.authorAttribute] as? String) ?? ""
+        )
+        let attributeSource = MetadataValueNormalizer.normalizeSource(
+            (attributes[PDFDocumentAttribute.subjectAttribute] as? String) ?? ""
+        )
+        let attributeYear: String = {
+            if let createdDate = attributes[PDFDocumentAttribute.creationDateAttribute] as? Date {
+                return yearString(from: createdDate)
+            }
+            if let modifiedDate = attributes[PDFDocumentAttribute.modificationDateAttribute] as? Date {
+                return yearString(from: modifiedDate)
+            }
+            return ""
+        }()
 
         var excerpt = ""
-        let upperBound = min(document.pageCount, 5)
+        let upperBound = min(document.pageCount, 8)
         for index in 0..<upperBound {
             guard let text = document.page(at: index)?.string else { continue }
             excerpt.append(text)
             excerpt.append("\n")
-            if excerpt.count >= 20_000 {
+            if excerpt.count >= 40_000 {
                 break
             }
         }
-        if excerpt.count > 20_000 {
-            excerpt = String(excerpt.prefix(20_000))
+        if excerpt.count > 40_000 {
+            excerpt = String(excerpt.prefix(40_000))
         }
 
-        metadata.doi = detectDOI(in: excerpt)
+        metadata.doi = MetadataValueNormalizer.normalizeDOI(detectDOI(in: excerpt))
 
-        if metadata.title.isEmpty {
-            metadata.title = detectTitleInFrontMatter(excerpt)
-        }
-        if metadata.authors.isEmpty {
-            metadata.authors = detectAuthorsInFrontMatter(excerpt, title: metadata.title)
-        }
-        if metadata.year.isEmpty {
-            metadata.year = detectPublicationYear(in: excerpt)
-        }
+        let detectedTitle = MetadataValueNormalizer.normalizeTitle(detectTitleInFrontMatter(excerpt))
+        metadata.title = detectedTitle.isEmpty ? attributeTitle : detectedTitle
+
+        let detectedAuthors = MetadataValueNormalizer.normalizeAuthors(
+            detectAuthorsInFrontMatter(excerpt, title: metadata.title)
+        )
+        metadata.authors = detectedAuthors.isEmpty ? attributeAuthors : detectedAuthors
+
+        let detectedYear = MetadataValueNormalizer.normalizeYear(detectPublicationYear(in: excerpt))
+        metadata.year = detectedYear.isEmpty ? attributeYear : detectedYear
+
+        let detectedSource = MetadataValueNormalizer.normalizeSource(detectSourceInFrontMatter(excerpt))
+        metadata.source = detectedSource.isEmpty ? attributeSource : detectedSource
+
+        metadata.abstractText = MetadataValueNormalizer.normalize(
+            detectAbstractInFrontMatter(excerpt),
+            for: .abstractText
+        )
+
+        let citationMetadata = detectCitationMetadata(in: excerpt)
+        metadata.volume = MetadataValueNormalizer.normalizeVolume(citationMetadata.volume)
+        metadata.issue = MetadataValueNormalizer.normalizeIssue(citationMetadata.issue)
+        metadata.pages = MetadataValueNormalizer.normalizePages(citationMetadata.pages)
+        metadata.paperType = inferPaperType(source: metadata.source, frontMatterText: excerpt)
 
         return metadata
+    }
+
+    private func detectSourceInFileName(_ url: URL) -> String {
+        let parts = url.deletingPathExtension().lastPathComponent
+            .components(separatedBy: " - ")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard parts.count >= 4 else { return "" }
+        return parts[3]
     }
 
     private func yearString(from date: Date) -> String {
@@ -1822,44 +2598,112 @@ final class LibraryStore: ObservableObject {
         return ""
     }
 
-    private func detectTitleInFrontMatter(_ text: String) -> String {
-        let lines = text
-            .split(whereSeparator: \.isNewline)
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+    private func containsHanCharacters(_ value: String) -> Bool {
+        value.range(of: #"\p{Han}"#, options: .regularExpression) != nil
+    }
 
-        for line in lines.prefix(24) {
-            let lowered = line.lowercased()
-            if line.count < 8 || line.count > 240 {
-                continue
-            }
-            if lowered.contains("abstract")
-                || lowered.contains("keywords")
-                || lowered.contains("doi")
-                || lowered.contains("@") {
-                continue
-            }
-            return line
+    private func detectTitleInFrontMatter(_ text: String) -> String {
+        let lines = frontMatterLines(from: text, limit: 72)
+        if let explicitTitle = explicitTitleInFrontMatter(lines) {
+            return explicitTitle
         }
 
-        return ""
+        let preferredRange: Range<Int>? = {
+            guard let markerIndex = lines.firstIndex(where: { $0.lowercased().contains("publication details") }) else {
+                return nil
+            }
+            return (markerIndex + 1)..<min(lines.count, markerIndex + 10)
+        }()
+        var bestCandidate = ""
+        var bestScore = Int.min
+
+        for (index, line) in lines.enumerated() {
+            if isFrontMatterStopLine(line), !bestCandidate.isEmpty {
+                break
+            }
+
+            let candidates = titleCandidates(startingAt: index, lines: lines)
+            for candidate in candidates {
+                let normalized = MetadataValueNormalizer.normalizeTitle(candidate)
+                guard !normalized.isEmpty, isPotentialTitleLine(normalized) else { continue }
+                var score = titleCandidateScore(normalized, lineIndex: index)
+                if let preferredRange, preferredRange.contains(index) {
+                    score += 24
+                }
+                if score > bestScore {
+                    bestCandidate = normalized
+                    bestScore = score
+                }
+            }
+        }
+
+        return bestCandidate
+    }
+
+    private func explicitTitleInFrontMatter(_ lines: [String]) -> String? {
+        for line in lines.prefix(36) {
+            let patterns = [
+                #"(?i)^(?:title|article title|paper title)\s*[:：]\s*(.+)$"#,
+                #"^(?:题名|标题|论文题目)\s*[:：]\s*(.+)$"#
+            ]
+            for pattern in patterns {
+                guard let groups = firstRegexGroups(in: line, pattern: pattern),
+                      let candidate = groups[safe: 1] else {
+                    continue
+                }
+                let normalized = MetadataValueNormalizer.normalizeTitle(candidate)
+                if !normalized.isEmpty, isPotentialTitleLine(normalized) {
+                    return normalized
+                }
+            }
+        }
+        return nil
     }
 
     private func detectAuthorsInFrontMatter(_ text: String, title: String) -> String {
+        let referenceAuthors = detectAuthorsFromReferenceFormat(text)
+        if !referenceAuthors.isEmpty {
+            return referenceAuthors
+        }
+
         let titleNormalized = title
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
 
-        let lines = text
-            .split(whereSeparator: \.isNewline)
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        let lines = frontMatterLines(from: text, limit: 96)
+        let titleIndex = lines.firstIndex { line in
+            let normalizedLine = line
+                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return !titleNormalized.isEmpty
+                && (normalizedLine == titleNormalized
+                    || normalizedLine.contains(titleNormalized)
+                    || titleNormalized.contains(normalizedLine))
+        }
 
-        for line in lines.prefix(36) {
-            if line.count < 3 || line.count > 120 {
-                continue
+        if let titleIndex {
+            let upperBound = min(lines.count, titleIndex + 24)
+            var collectedAuthors: [String] = []
+            for index in (titleIndex + 1)..<upperBound {
+                if isFrontMatterStopLine(lines[index]) { break }
+                if let authors = normalizedAuthors(fromFrontMatterLine: lines[index]) {
+                    collectedAuthors.append(contentsOf: AuthorNameParser.parse(raw: authors))
+                    continue
+                }
+                if index + 1 < upperBound {
+                    let combined = "\(lines[index]); \(lines[index + 1])"
+                    if let authors = normalizedAuthors(fromFrontMatterLine: combined) {
+                        collectedAuthors.append(contentsOf: AuthorNameParser.parse(raw: authors))
+                    }
+                }
             }
+            let normalized = normalizedUniqueAuthors(collectedAuthors)
+            if !normalized.isEmpty {
+                return normalized
+            }
+        }
 
+        for line in lines.prefix(48) {
             let normalizedLine = line
                 .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1867,42 +2711,61 @@ final class LibraryStore: ObservableObject {
                 continue
             }
 
-            let lowered = line.lowercased()
-            if lowered.contains("abstract")
-                || lowered.contains("keywords")
-                || lowered.contains("university")
-                || lowered.contains("department")
-                || lowered.contains("journal")
-                || lowered.contains("doi")
-                || lowered.contains("@")
-                || lowered.contains("http")
-                || lowered.contains("www.") {
-                continue
-            }
-
-            let separators = [" and ", " & ", "，", ",", ";", "；", "、", "与", "和"]
-            let containsSeparator = separators.contains { lowered.contains($0.lowercased()) }
-            if !containsSeparator, !looksLikePersonName(line) {
-                continue
-            }
-
-            let names = AuthorNameParser.parse(raw: line)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters)) }
-                .filter { looksLikePersonName($0) }
-
-            if names.count >= 2 {
-                return names.joined(separator: ", ")
-            }
-            if names.count == 1 {
-                return names[0]
+            if let authors = normalizedAuthors(fromFrontMatterLine: line) {
+                return authors
             }
         }
 
         return ""
     }
 
+    private func detectAuthorsFromReferenceFormat(_ text: String) -> String {
+        let lines = frontMatterLines(from: text, limit: 180)
+        guard let markerIndex = lines.firstIndex(where: {
+            $0.lowercased().contains("reference format")
+                || $0.lowercased().contains("recommended citation")
+                || $0.contains("引用格式")
+        }) else {
+            return ""
+        }
+
+        let citation = lines[(markerIndex + 1)..<min(lines.count, markerIndex + 8)]
+            .joined(separator: " ")
+        let patterns = [
+            #"^(.+?)\.\s*(?:19|20)\d{2}\.\s+"#,
+            #"^(.+?)\s+(?:19|20)\d{2}\.\s+"#
+        ]
+        for pattern in patterns {
+            guard let groups = firstRegexGroups(in: citation, pattern: pattern),
+                  let authorSegment = groups[safe: 1] else {
+                continue
+            }
+            let normalized = MetadataValueNormalizer.normalizeAuthors(authorSegment)
+            let authors = AuthorNameParser.parse(raw: normalized)
+                .filter { looksLikePersonName($0) }
+            let result = normalizedUniqueAuthors(authors)
+            if !result.isEmpty {
+                return result
+            }
+        }
+
+        return ""
+    }
+
+    private func normalizedUniqueAuthors(_ authors: [String]) -> String {
+        var seen: Set<String> = []
+        let normalized = authors.compactMap { rawName -> String? in
+            let name = MetadataValueNormalizer.cleanSingleLine(rawName)
+            guard !name.isEmpty, looksLikePersonName(name) else { return nil }
+            let key = AuthorNameParser.normalizedToken(from: name)
+            guard !key.isEmpty, seen.insert(key).inserted else { return nil }
+            return name
+        }
+        return normalized.joined(separator: ", ")
+    }
+
     private func looksLikePersonName(_ value: String) -> Bool {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        let trimmed = value.trimmingCharacters(in: CharacterSet(charactersIn: " \t\r\n,;:|/\\()[]{}<>*"))
         guard !trimmed.isEmpty else { return false }
         if trimmed.range(of: #"\d"#, options: .regularExpression) != nil {
             return false
@@ -1910,10 +2773,36 @@ final class LibraryStore: ObservableObject {
         if trimmed.contains("@") || trimmed.contains("http") {
             return false
         }
+        if isLikelyFrontMatterNoise(trimmed) {
+            return false
+        }
+        let loweredName = trimmed.lowercased()
+        let titleLikeTokens = [
+            "effect", "effects", "study", "analysis", "learning", "education", "research",
+            "model", "impact", "teacher", "teachers", "student", "students", "using",
+            "based", "review", "systematic", "development", "assessment", "approach",
+            "generative", "productivity", "support", "tools", "reliance", "automation",
+            "feedback", "intelligence"
+        ]
+        if titleLikeTokens.contains(where: { loweredName.contains($0) }) {
+            return false
+        }
 
         let words = trimmed.split(whereSeparator: \.isWhitespace)
         if words.count >= 2, words.count <= 6 {
-            return true
+            return words.allSatisfy { token in
+                let value = String(token).trimmingCharacters(in: CharacterSet(charactersIn: ".,"))
+                guard !value.isEmpty else { return false }
+                let lowered = value.lowercased()
+                if ["de", "del", "der", "van", "von", "al", "bin", "da", "dos"].contains(lowered) {
+                    return true
+                }
+                if value.count == 1 {
+                    return true
+                }
+                guard let first = value.unicodeScalars.first else { return false }
+                return CharacterSet.uppercaseLetters.contains(first)
+            }
         }
 
         if trimmed.range(of: #"^[\p{Han}·]{2,16}$"#, options: .regularExpression) != nil {
@@ -1928,24 +2817,549 @@ final class LibraryStore: ObservableObject {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
             return ""
         }
-        let nsText = text as NSString
-        let range = NSRange(location: 0, length: nsText.length)
-        let matches = regex.matches(in: text, options: [], range: range)
-        guard !matches.isEmpty else { return "" }
-
         let currentYear = Calendar.current.component(.year, from: .now)
-        let years: [Int] = matches.compactMap { match in
-            let token = nsText.substring(with: match.range)
-            guard let value = Int(token) else { return nil }
-            guard (1900...(currentYear + 1)).contains(value) else { return nil }
-            return value
+        let lines = frontMatterLines(from: text, limit: 120)
+
+        func firstValidYear(in value: String) -> String? {
+            let nsValue = value as NSString
+            let range = NSRange(location: 0, length: nsValue.length)
+            for match in regex.matches(in: value, options: [], range: range) {
+                let token = nsValue.substring(with: match.range)
+                guard let year = Int(token), (1900...(currentYear + 1)).contains(year) else { continue }
+                return token
+            }
+            return nil
         }
 
-        guard !years.isEmpty else { return "" }
-        if let mostRecent = years.max() {
-            return String(mostRecent)
+        let dateContextTokens = [
+            "published", "publication", "copyright", "©", "received", "accepted",
+            "available online", "volume", "vol.", "issue", "no."
+        ]
+        for line in lines {
+            let lowered = line.lowercased()
+            guard dateContextTokens.contains(where: { lowered.contains($0) }) else { continue }
+            if let year = firstValidYear(in: line) {
+                return year
+            }
+        }
+
+        for line in lines {
+            if let year = firstValidYear(in: line) {
+                return year
+            }
         }
         return ""
+    }
+
+    private func detectSourceInFrontMatter(_ text: String) -> String {
+        let lines = frontMatterLines(from: text, limit: 96)
+        if let source = sourceFromReferenceFormat(lines) {
+            return source
+        }
+
+        if let markerIndex = lines.firstIndex(where: { $0.lowercased().contains("publication details") }) {
+            let lowerBound = max(0, markerIndex - 6)
+            let fragments = lines[lowerBound..<markerIndex].filter { line in
+                !isLikelyPublicationBoilerplate(line)
+            }
+            let maxFragmentCount = min(3, fragments.count)
+            for length in stride(from: maxFragmentCount, through: 1, by: -1) {
+                let candidate = fragments.suffix(length).joined(separator: " ")
+                let source = MetadataValueNormalizer.normalizeSource(candidate)
+                if !source.isEmpty, !isLikelyFrontMatterNoise(source), source.count >= 5 {
+                    return source
+                }
+            }
+        }
+
+        for line in lines.prefix(48) {
+            let lowered = line.lowercased()
+            guard line.count >= 4, line.count <= 180 else { continue }
+            if isLikelyFrontMatterNoise(line) {
+                continue
+            }
+            if let source = sourceFromCitationLine(line) {
+                return source
+            }
+            if lowered.contains("journal homepage")
+                || lowered.contains("contents lists available") {
+                continue
+            }
+            if lowered.contains("journal of")
+                || lowered.contains("proceedings")
+                || lowered.contains("conference")
+                || lowered.contains("transactions on")
+                || lowered.contains("期刊")
+                || lowered.contains("学报")
+                || lowered.contains("会议") {
+                return MetadataValueNormalizer.normalizeSource(line)
+            }
+        }
+
+        return ""
+    }
+
+    private func sourceFromReferenceFormat(_ lines: [String]) -> String? {
+        guard let markerIndex = lines.firstIndex(where: {
+            $0.lowercased().contains("reference format")
+                || $0.lowercased().contains("recommended citation")
+                || $0.contains("引用格式")
+        }) else {
+            return nil
+        }
+
+        let citation = lines[(markerIndex + 1)..<min(lines.count, markerIndex + 8)]
+            .joined(separator: " ")
+        let patterns = [
+            #"(?i)\bIn\s+(.+?)\s*\("#,
+            #"(?i)\bIn\s+(.+?)\.\s+"#,
+            #",\s*([^,]{4,140}?)\s*,\s*\d{1,4}\s*[:(]"#
+        ]
+        for pattern in patterns {
+            guard let groups = firstRegexGroups(in: citation, pattern: pattern),
+                  let rawSource = groups[safe: 1] else {
+                continue
+            }
+            let source = MetadataValueNormalizer.normalizeSource(rawSource)
+            if !source.isEmpty {
+                return source
+            }
+        }
+        return nil
+    }
+
+    private func isLikelyPublicationBoilerplate(_ line: String) -> Bool {
+        let lowered = line.lowercased()
+        return isLikelyFrontMatterNoise(line)
+            || lowered.hasPrefix("publisher:")
+            || lowered.contains("registered in")
+            || lowered.hasPrefix("office:")
+            || lowered.contains("subscription information")
+            || lowered.contains("http")
+    }
+
+    private func sourceFromCitationLine(_ line: String) -> String? {
+        let patterns = [
+            #"(?i)^(.{4,140}?)\s+\bvol(?:ume)?\.?\s*\d+\b.*$"#,
+            #"(?i)^(.{4,140}?)\s+\b\d{1,4}\s*\(\s*[A-Za-z]?\d+[A-Za-z]?\s*\).*$"#,
+            #"^(.{4,140}?)\s+第\s*\d+\s*卷.*$"#,
+            #"^(.{4,140}?)\s+\d+\s*卷\s*\d+\s*期.*$"#
+        ]
+        for pattern in patterns {
+            guard let groups = firstRegexGroups(in: line, pattern: pattern),
+                  let rawSource = groups[safe: 1] else {
+                continue
+            }
+            let source = MetadataValueNormalizer.normalizeSource(rawSource)
+            if !source.isEmpty {
+                return source
+            }
+        }
+        return nil
+    }
+
+    private func detectAbstractInFrontMatter(_ text: String) -> String {
+        let lines = frontMatterLines(from: text, limit: 180)
+        var fragments: [String] = []
+        var isCollecting = false
+
+        for line in lines {
+            if !isCollecting {
+                guard let payload = abstractPayload(fromStartLine: line) else { continue }
+                isCollecting = true
+                if !payload.isEmpty {
+                    fragments.append(payload)
+                }
+                continue
+            }
+
+            if isAbstractStopLine(line) {
+                break
+            }
+            fragments.append(line)
+            if fragments.joined(separator: " ").count >= 1_800 {
+                break
+            }
+        }
+
+        let abstract = MetadataValueNormalizer.cleanSingleLine(fragments.joined(separator: " "))
+        guard abstract.count >= 24 else { return "" }
+        return String(abstract.prefix(2_000)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func abstractPayload(fromStartLine line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lowered = trimmed.lowercased()
+
+        if lowered == "abstract" || lowered == "summary" || trimmed == "摘要" {
+            return ""
+        }
+
+        let patterns = [
+            #"(?i)^abstract\s*[:：.\-]?\s*(.+)$"#,
+            #"(?i)^summary\s*[:：.\-]?\s*(.+)$"#,
+            #"^摘要\s*[:：]?\s*(.+)$"#
+        ]
+        for pattern in patterns {
+            if let groups = firstRegexGroups(in: trimmed, pattern: pattern),
+               let payload = groups[safe: 1] {
+                return payload
+            }
+        }
+        return nil
+    }
+
+    private func isAbstractStopLine(_ line: String) -> Bool {
+        let lowered = line.lowercased()
+        if lowered == "keywords" || lowered.hasPrefix("keywords:")
+            || lowered.hasPrefix("key words")
+            || lowered == "introduction"
+            || lowered.hasPrefix("1 introduction")
+            || lowered.hasPrefix("1. introduction")
+            || lowered == "references"
+            || lowered.hasPrefix("acknowledg") {
+            return true
+        }
+        if line.hasPrefix("关键词") || line.hasPrefix("引言") || line.hasPrefix("参考文献") {
+            return true
+        }
+        return false
+    }
+
+    private func inferPaperType(source: String, frontMatterText: String) -> String {
+        let normalized = "\(source) \(frontMatterLines(from: frontMatterText, limit: 48).joined(separator: " "))"
+        let lowered = normalized.lowercased()
+        if lowered.contains("proceedings")
+            || lowered.contains("conference")
+            || normalized.contains("会议") {
+            return "会议论文"
+        }
+        if lowered.contains("journal")
+            || lowered.contains("transactions on")
+            || normalized.contains("期刊")
+            || normalized.contains("学报") {
+            return "期刊文章"
+        }
+        return ""
+    }
+
+    private func detectCitationMetadata(in text: String) -> (volume: String, issue: String, pages: String) {
+        let frontMatter = frontMatterLines(from: text, limit: 140)
+            .prefix(140)
+            .joined(separator: "\n")
+        let normalized = MetadataValueNormalizer.cleanSingleLine(frontMatter)
+        var volume = ""
+        var issue = ""
+        var pages = ""
+
+        if let match = firstRegexGroups(
+            in: normalized,
+            pattern: #"(?i)\bvol(?:ume)?\.?\s*[:：]?\s*([A-Za-z]?\d+[A-Za-z]?)\b.*?\b(?:no\.?|number|issue)\s*[:：]?\s*([A-Za-z]?\d+[A-Za-z]?)\b.*?\b([A-Za-z]?\d+[A-Za-z]?\s*[-–—]\s*[A-Za-z]?\d+[A-Za-z]?|e\d+)\b"#
+        ) {
+            volume = match[safe: 1] ?? ""
+            issue = match[safe: 2] ?? ""
+            pages = match[safe: 3] ?? ""
+        }
+
+        if volume.isEmpty,
+           let match = firstRegexGroups(
+            in: normalized,
+            pattern: #"(?i)\bvolume\s*[:：]?\s*([A-Za-z]?\d+[A-Za-z]?)\b.*?\bissue\s*[:：]?\s*([A-Za-z]?\d+[A-Za-z]?)\b.*?\bpages?\s*[:：]?\s*([A-Za-z]?\d+[A-Za-z]?\s*[-–—]\s*[A-Za-z]?\d+[A-Za-z]?|e\d+)\b"#
+           ) {
+            volume = match[safe: 1] ?? ""
+            issue = match[safe: 2] ?? ""
+            pages = match[safe: 3] ?? ""
+        }
+
+        if volume.isEmpty,
+           let match = firstRegexGroups(
+            in: normalized,
+            pattern: #"第\s*([A-Za-z]?\d+[A-Za-z]?)\s*卷\s*第?\s*([A-Za-z]?\d+[A-Za-z]?)\s*期.*?([A-Za-z]?\d+[A-Za-z]?\s*[-–—]\s*[A-Za-z]?\d+[A-Za-z]?)"#
+           ) {
+            volume = match[safe: 1] ?? ""
+            issue = match[safe: 2] ?? ""
+            pages = match[safe: 3] ?? ""
+        }
+
+        if volume.isEmpty,
+           let match = firstRegexGroups(
+            in: normalized,
+            pattern: #"(?i)\b([1-9]\d{0,3})\s*:\s*([A-Za-z]?\d+[A-Za-z]?)\s*,\s*([A-Za-z]?\d+[A-Za-z]?\s*[-–—]\s*[A-Za-z]?\d+[A-Za-z]?)\b"#
+           ) {
+            volume = match[safe: 1] ?? ""
+            issue = match[safe: 2] ?? ""
+            pages = match[safe: 3] ?? ""
+        }
+
+        if let match = firstRegexGroups(
+            in: normalized,
+            pattern: #"(?i)\bvol(?:ume)?\.?\s*[:：]?\s*([A-Za-z]?\d+[A-Za-z]?)\b[,\s;|]*(?:no\.?|number|issue)\s*[:：]?\s*([A-Za-z]?\d+[A-Za-z]?)\b"#
+        ) {
+            if volume.isEmpty {
+                volume = match[safe: 1] ?? ""
+            }
+            if issue.isEmpty {
+                issue = match[safe: 2] ?? ""
+            }
+        }
+
+        if volume.isEmpty,
+           let match = firstRegexGroups(
+            in: normalized,
+            pattern: #"(?i)\bvol(?:ume)?\.?\s*[:：]?\s*([A-Za-z]?\d+[A-Za-z]?)\b"#
+           ) {
+            volume = match[safe: 1] ?? ""
+        }
+
+        if issue.isEmpty,
+           let match = firstRegexGroups(
+            in: normalized,
+            pattern: #"(?i)\b(?:issue|number|no\.?)\s*[:：]?\s*([A-Za-z]?\d+[A-Za-z]?)\b"#
+           ) {
+            issue = match[safe: 1] ?? ""
+        }
+
+        if let match = firstRegexGroups(
+            in: normalized,
+            pattern: #"(?i)\b([A-Za-z]?\d{1,4}[A-Za-z]?)\s*\(\s*([A-Za-z]?\d{1,4}[A-Za-z]?)\s*\)\s*[:,]?\s*(?:pp?\.?|pages?)?\s*([A-Za-z]?\d+[A-Za-z]?\s*[-–—]\s*[A-Za-z]?\d+[A-Za-z]?|e\d+)\b"#
+        ) {
+            if volume.isEmpty {
+                volume = match[safe: 1] ?? ""
+            }
+            if issue.isEmpty {
+                issue = match[safe: 2] ?? ""
+            }
+            if pages.isEmpty {
+                pages = match[safe: 3] ?? ""
+            }
+        }
+
+        if let match = firstRegexGroups(
+            in: normalized,
+            pattern: #"(?i)\b([1-9]\d{0,3})\s*\(\s*(?:19|20)\d{2}\s*\)\s*([A-Za-z]?\d{4,}[A-Za-z]?)\b"#
+        ) {
+            if volume.isEmpty {
+                volume = match[safe: 1] ?? ""
+            }
+            if pages.isEmpty {
+                pages = match[safe: 2] ?? ""
+            }
+        }
+
+        if pages.isEmpty,
+           let match = firstRegexGroups(
+            in: normalized,
+            pattern: #"(?i)\b(?:pp?\.?|pages?)\s*[:：]?\s*([A-Za-z]?\d+[A-Za-z]?\s*[-–—]\s*[A-Za-z]?\d+[A-Za-z]?|e\d+)\b"#
+           ) {
+            pages = match[safe: 1] ?? ""
+        }
+
+        if pages.isEmpty,
+           let match = firstRegexGroups(
+            in: normalized,
+            pattern: #"(?i)\b(?:页码|页)\s*[:：]?\s*([A-Za-z]?\d+[A-Za-z]?\s*[-–—]\s*[A-Za-z]?\d+[A-Za-z]?)\b"#
+           ) {
+            pages = match[safe: 1] ?? ""
+        }
+
+        if pages.isEmpty,
+           let match = firstRegexGroups(
+            in: normalized,
+            pattern: #"(?i)\barticle\s+(?:number|no\.?)\s*[:：]?\s*([A-Za-z]?\d+[A-Za-z]?)\b"#
+           ) {
+            pages = match[safe: 1] ?? ""
+        }
+
+        if pages.isEmpty,
+           let match = firstRegexGroups(
+            in: normalized,
+            pattern: #"(?i)\b([1-9]\d{0,2})\s+pages\b"#
+           ) {
+            pages = match[safe: 1] ?? ""
+        }
+
+        return (volume, issue, pages)
+    }
+
+    private func firstRegexGroups(in text: String, pattern: String) -> [String]? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        guard let match = regex.firstMatch(in: text, options: [], range: range) else { return nil }
+
+        return (0..<match.numberOfRanges).map { index in
+            let range = match.range(at: index)
+            guard range.location != NSNotFound else { return "" }
+            return nsText.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    private func frontMatterLines(from text: String, limit: Int) -> [String] {
+        var lines: [String] = []
+        lines.reserveCapacity(limit)
+
+        for line in text.split(whereSeparator: \.isNewline) {
+            let normalized = MetadataValueNormalizer.cleanSingleLine(String(line as Substring))
+            guard !normalized.isEmpty else { continue }
+            lines.append(normalized)
+            if lines.count >= limit {
+                break
+            }
+        }
+
+        return lines
+    }
+
+    private func titleCandidates(startingAt index: Int, lines: [String]) -> [String] {
+        guard lines.indices.contains(index) else { return [] }
+        let line = lines[index]
+        var candidates = [line]
+
+        var combined = line
+        for nextIndex in (index + 1)..<min(lines.count, index + 3) {
+            let nextLine = lines[nextIndex]
+            guard !isLikelyAuthorLine(nextLine),
+                  !isFrontMatterStopLine(nextLine),
+                  !isLikelyFrontMatterNoise(nextLine) else {
+                break
+            }
+            combined += " \(nextLine)"
+            if combined.count <= 280 {
+                candidates.append(combined)
+            }
+        }
+
+        return candidates
+    }
+
+    private func isPotentialTitleLine(_ line: String) -> Bool {
+        let lowered = line.lowercased()
+        let wordCount = line.split(whereSeparator: \.isWhitespace).count
+        guard line.count >= 8, line.count <= 240, wordCount >= 3 else { return false }
+        if isLikelyFrontMatterNoise(line) {
+            return false
+        }
+        if lowered.contains("abstract")
+            || lowered.contains("keywords")
+            || lowered.contains("publication details")
+            || lowered.contains("instructions for authors")
+            || lowered.contains("registered office")
+            || lowered.contains("publisher:")
+            || lowered.contains("downloaded by")
+            || lowered.contains("article views")
+            || lowered.contains("view related articles")
+            || lowered.contains("see discussions")
+            || lowered.contains("researchgate")
+            || lowered.contains("doi")
+            || lowered.contains("issn")
+            || lowered.contains("isbn")
+            || lowered.contains("vol.")
+            || lowered.contains("volume ")
+            || lowered.contains("issue ")
+            || lowered.contains("copyright")
+            || lowered.contains("received")
+            || lowered.contains("accepted")
+            || lowered.contains("available online") {
+            return false
+        }
+        if line.contains("@") || lowered.contains("http") || lowered.contains("www.") {
+            return false
+        }
+        return true
+    }
+
+    private func titleCandidateScore(_ line: String, lineIndex: Int) -> Int {
+        let wordCount = line.split(whereSeparator: \.isWhitespace).count
+        var score = 0
+        score += max(0, 40 - lineIndex)
+        score += min(40, wordCount * 3)
+        if (40...180).contains(line.count) {
+            score += 18
+        }
+        if line.contains(":") || line.contains("?") {
+            score += 6
+        }
+        if line.range(of: #"[a-z]"#, options: .regularExpression) != nil,
+           line.range(of: #"[A-Z]"#, options: .regularExpression) != nil {
+            score += 5
+        }
+        if isLikelyAuthorLine(line) {
+            score -= 30
+        }
+        return score
+    }
+
+    private func normalizedAuthors(fromFrontMatterLine line: String) -> String? {
+        guard line.count >= 3, line.count <= 180 else { return nil }
+        guard !isLikelyFrontMatterNoise(line) else { return nil }
+
+        let lowered = line.lowercased()
+        if lowered.contains("abstract")
+            || lowered.contains("keywords")
+            || lowered.contains("journal")
+            || lowered.contains("doi")
+            || lowered.contains("received")
+            || lowered.contains("accepted")
+            || lowered.contains("available online") {
+            return nil
+        }
+
+        let separators = [" and ", " & ", "，", ",", ";", "；", "、", "与", "和"]
+        let containsSeparator = separators.contains { lowered.contains($0.lowercased()) }
+        if !containsSeparator, !looksLikePersonName(line) {
+            return nil
+        }
+
+        let normalized = MetadataValueNormalizer.normalizeAuthors(line)
+        guard !normalized.isEmpty else { return nil }
+        let names = AuthorNameParser.parse(raw: normalized)
+        guard !names.isEmpty else { return nil }
+        let plausibleNames = names.filter { looksLikePersonName($0) }
+        guard plausibleNames.count == names.count else { return nil }
+        return plausibleNames.joined(separator: ", ")
+    }
+
+    private func isLikelyAuthorLine(_ line: String) -> Bool {
+        normalizedAuthors(fromFrontMatterLine: line) != nil
+    }
+
+    private func isFrontMatterStopLine(_ line: String) -> Bool {
+        let lowered = line.lowercased()
+        return lowered == "abstract"
+            || lowered.hasPrefix("abstract ")
+            || lowered.hasPrefix("abstract:")
+            || lowered.hasPrefix("keywords")
+            || lowered.hasPrefix("introduction")
+            || lowered.hasPrefix("1 introduction")
+            || lowered.hasPrefix("摘要")
+            || lowered.hasPrefix("关键词")
+    }
+
+    private func isLikelyFrontMatterNoise(_ line: String) -> Bool {
+        let lowered = line.lowercased()
+        return lowered.contains("contents lists available")
+            || lowered.contains("journal homepage")
+            || lowered.contains("downloaded from")
+            || lowered.contains("downloaded by")
+            || lowered.contains("all rights reserved")
+            || lowered.contains("creative commons")
+            || lowered.contains("open access")
+            || lowered.contains("crossmark")
+            || lowered.contains("sciencedirect")
+            || lowered.contains("springerlink")
+            || lowered.contains("wiley online library")
+            || lowered.contains("taylor & francis")
+            || lowered.contains("elsevier")
+            || lowered.contains("publication details")
+            || lowered.contains("instructions for authors")
+            || lowered.contains("registered office")
+            || lowered.contains("cookie policy")
+            || lowered.contains("terms and conditions")
+            || lowered.contains("researchgate")
+            || lowered.contains("see discussions")
+            || lowered.contains("article views")
+            || lowered.contains("view related articles")
     }
 
     private func detectDOI(in text: String) -> String {
@@ -1965,8 +3379,12 @@ final class LibraryStore: ObservableObject {
 
     private func markOpened(paperID: UUID) {
         guard let index = indexOfPaper(id: paperID) else { return }
-        papers[index].lastOpenedAt = .now
-        papers[index].lastEditedAtMilliseconds = Paper.currentTimestampMilliseconds()
+        let now = Date()
+        if let lastOpenedAt = papers[index].lastOpenedAt,
+           now.timeIntervalSince(lastOpenedAt) < 1.5 {
+            return
+        }
+        papers[index].lastOpenedAt = now
         save()
     }
 
@@ -2146,7 +3564,10 @@ final class LibraryStore: ObservableObject {
     }
 
     private var storageDirectory: URL {
-        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("Application Support", isDirectory: true)
         return base.appendingPathComponent("Litrix", isDirectory: true)
     }
 
@@ -2329,7 +3750,11 @@ final class LibraryStore: ObservableObject {
         if let folderURL = paperDirectoryURL(for: paper),
            let fileNames = try? fileManager.contentsOfDirectory(atPath: folderURL.path) {
             return fileNames
-                .filter { $0.lowercased().hasSuffix(".pdf") && !$0.hasPrefix(".") }
+                .filter { fileName in
+                    guard !fileName.hasPrefix(".") else { return false }
+                    let ext = URL(fileURLWithPath: fileName).pathExtension.lowercased()
+                    return supportedAttachmentFileExtensions.contains(ext)
+                }
                 .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
                 .map { folderURL.appendingPathComponent($0, isDirectory: false) }
         }
@@ -2339,6 +3764,36 @@ final class LibraryStore: ObservableObject {
         }
 
         return []
+    }
+
+    private func translatedPreferredPDFURL(for paper: Paper) -> URL? {
+        guard settings.preferTranslatedPDF else { return nil }
+
+        let candidates = availablePDFURLs(for: paper).filter { url in
+            url.pathExtension.lowercased() == "pdf"
+                && url.deletingPathExtension().lastPathComponent.hasSuffix("-dual")
+                && fileManager.fileExists(atPath: url.path)
+        }
+        guard !candidates.isEmpty else { return nil }
+
+        let preferredBaseNames = [
+            normalizedPDFFileName(paper.preferredOpenPDFFileName),
+            normalizedPDFFileName(paper.storedPDFFileName),
+            normalizedPDFFileName(paper.originalPDFFileName)
+        ]
+        .compactMap { $0 }
+        .map { URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent }
+
+        for baseName in preferredBaseNames {
+            let expected = "\(baseName)-dual.pdf"
+            if let match = candidates.first(where: { $0.lastPathComponent == expected }) {
+                return match
+            }
+        }
+
+        return candidates.sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        }.first
     }
 
     private func normalizedPDFFileName(_ value: String?) -> String? {
@@ -2594,7 +4049,8 @@ final class LibraryStore: ObservableObject {
         if fileName == imagesDirectoryName || fileName == legacyNoteFileName || fileName == canonicalNoteFileName {
             return false
         }
-        if fileName.lowercased().hasSuffix(".txt") || fileName.lowercased().hasSuffix(".pdf") {
+        let fileExtension = URL(fileURLWithPath: fileName).pathExtension.lowercased()
+        if !supportedImageExtensions.contains(fileExtension) {
             return false
         }
         if let pdfFileName, fileName == pdfFileName {
@@ -2688,6 +4144,12 @@ final class LibraryStore: ObservableObject {
             }
             counter += 1
         }
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 

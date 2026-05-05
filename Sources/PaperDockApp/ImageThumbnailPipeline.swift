@@ -42,6 +42,15 @@ actor ImageThumbnailPipeline {
         return image
     }
 
+    func prefetch(urls: [URL], maxPixel: CGFloat, limit: Int = 24) async {
+        guard limit > 0 else { return }
+        let targets = Array(urls.prefix(limit))
+        for url in targets {
+            if Task.isCancelled { break }
+            _ = await image(for: url, maxPixel: maxPixel)
+        }
+    }
+
     private func cacheKey(for url: URL, pixel: Int) -> NSString {
         "\(url.standardizedFileURL.path)#\(pixel)" as NSString
     }
@@ -71,15 +80,23 @@ struct ThumbnailImageView: View {
     let url: URL
     let maxPixel: CGFloat
     var placeholderOpacity: Double = 0.16
+    var contentMode: ContentMode = .fill
 
     @State private var image: NSImage?
 
     var body: some View {
         Group {
             if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
+                switch contentMode {
+                case .fit:
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                default:
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                }
             } else {
                 Rectangle()
                     .fill(Color.secondary.opacity(placeholderOpacity))

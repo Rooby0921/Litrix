@@ -8,6 +8,26 @@ enum PaperRatingScale {
     }
 }
 
+func normalizeDOIIdentifier(_ raw: String) -> String {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return "" }
+
+    let lowered = trimmed.lowercased()
+    let stripped = lowered.replacingOccurrences(
+        of: #"^\s*(?:https?://(?:dx\.)?doi\.org/|doi:\s*)"#,
+        with: "",
+        options: [.regularExpression]
+    )
+
+    let candidate = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let range = candidate.range(of: #"10\.\d{4,9}/\S+"#, options: [.regularExpression]) {
+        return String(candidate[range])
+            .trimmingCharacters(in: CharacterSet(charactersIn: " \t\r\n<>[]{}()\"'.,;:"))
+    }
+
+    return candidate.trimmingCharacters(in: CharacterSet(charactersIn: " \t\r\n<>[]{}()\"'.,;:"))
+}
+
 enum TagPaletteColor: String, CaseIterable, Codable, Identifiable {
     case red
     case orange
@@ -106,6 +126,9 @@ enum AuthorNameParser {
 
             if rawParts.count >= 2 {
                 let looksLikeSurnameCommaGiven = rawParts.count % 2 == 0
+                    && rawParts.allSatisfy { part in
+                        part.range(of: #"\p{Han}"#, options: .regularExpression) == nil
+                    }
                     && stride(from: 0, to: rawParts.count, by: 2).allSatisfy { index in
                         rawParts[index].split(separator: " ").count == 1
                     }
@@ -204,20 +227,24 @@ struct PaperSearchMetadata: Codable, Hashable {
 struct Paper: Identifiable, Codable, Hashable {
     var id: UUID
     var title: String
+    var chineseTitle: String
     var englishTitle: String
     var authors: String {
         didSet {
             guard oldValue != authors else { return }
-            searchMetadata = PaperSearchMetadata(authors: authors)
+            refreshDerivedSearchData()
         }
     }
     var authorsEnglish: String
     var searchMetadata: PaperSearchMetadata
+    var searchIndexBlob: String
     var year: String
     var source: String
     var rating: Int
     var doi: String
     var abstractText: String
+    var englishAbstract: String
+    var chineseAbstract: String
     var notes: String
     var collections: [String]
     var tags: [String]
@@ -241,6 +268,7 @@ struct Paper: Identifiable, Codable, Hashable {
     var country: String
     var keywords: String
     var limitations: String
+    var webPageURL: String
     var storageFolderName: String?
     var storedPDFFileName: String?
     var originalPDFFileName: String?
@@ -250,10 +278,12 @@ struct Paper: Identifiable, Codable, Hashable {
     var importedAt: Date
     var lastOpenedAt: Date?
     var lastEditedAtMilliseconds: Int64?
+    var deletedAt: Date?
 
     init(
         id: UUID = UUID(),
         title: String = "",
+        chineseTitle: String = "",
         englishTitle: String = "",
         authors: String = "",
         authorsEnglish: String = "",
@@ -262,6 +292,8 @@ struct Paper: Identifiable, Codable, Hashable {
         rating: Int = 0,
         doi: String = "",
         abstractText: String = "",
+        englishAbstract: String = "",
+        chineseAbstract: String = "",
         notes: String = "",
         collections: [String] = [],
         tags: [String] = [],
@@ -285,6 +317,7 @@ struct Paper: Identifiable, Codable, Hashable {
         country: String = "",
         keywords: String = "",
         limitations: String = "",
+        webPageURL: String = "",
         storageFolderName: String? = nil,
         storedPDFFileName: String? = nil,
         originalPDFFileName: String? = nil,
@@ -294,19 +327,24 @@ struct Paper: Identifiable, Codable, Hashable {
         importedAt: Date = .now,
         lastOpenedAt: Date? = nil,
         lastEditedAtMilliseconds: Int64? = nil,
+        deletedAt: Date? = nil,
         searchMetadata: PaperSearchMetadata? = nil
     ) {
         self.id = id
         self.title = title
+        self.chineseTitle = chineseTitle
         self.englishTitle = englishTitle
         self.authors = authors
         self.authorsEnglish = authorsEnglish
         self.searchMetadata = searchMetadata ?? PaperSearchMetadata(authors: authors)
+        self.searchIndexBlob = ""
         self.year = year
         self.source = source
         self.rating = PaperRatingScale.clamped(rating)
         self.doi = doi
         self.abstractText = abstractText
+        self.englishAbstract = englishAbstract
+        self.chineseAbstract = chineseAbstract
         self.notes = notes
         self.collections = collections
         self.tags = tags
@@ -330,6 +368,7 @@ struct Paper: Identifiable, Codable, Hashable {
         self.country = country
         self.keywords = keywords
         self.limitations = limitations
+        self.webPageURL = webPageURL
         self.storageFolderName = storageFolderName
         self.storedPDFFileName = storedPDFFileName
         self.originalPDFFileName = originalPDFFileName
@@ -339,11 +378,14 @@ struct Paper: Identifiable, Codable, Hashable {
         self.importedAt = importedAt
         self.lastOpenedAt = lastOpenedAt
         self.lastEditedAtMilliseconds = lastEditedAtMilliseconds
+        self.deletedAt = deletedAt
+        refreshDerivedSearchData()
     }
 
     private enum CodingKeys: String, CodingKey {
         case id
         case title
+        case chineseTitle
         case englishTitle
         case authors
         case authorsEnglish
@@ -353,6 +395,8 @@ struct Paper: Identifiable, Codable, Hashable {
         case rating
         case doi
         case abstractText
+        case englishAbstract
+        case chineseAbstract
         case notes
         case collections
         case tags
@@ -376,6 +420,7 @@ struct Paper: Identifiable, Codable, Hashable {
         case country
         case keywords
         case limitations
+        case webPageURL
         case storageFolderName
         case storedPDFFileName
         case originalPDFFileName
@@ -385,12 +430,14 @@ struct Paper: Identifiable, Codable, Hashable {
         case importedAt
         case lastOpenedAt
         case lastEditedAtMilliseconds
+        case deletedAt
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         title = try container.decodeIfPresent(String.self, forKey: .title) ?? ""
+        chineseTitle = try container.decodeIfPresent(String.self, forKey: .chineseTitle) ?? ""
         englishTitle = try container.decodeIfPresent(String.self, forKey: .englishTitle) ?? ""
         let decodedAuthors = try container.decodeIfPresent(String.self, forKey: .authors) ?? ""
         authors = decodedAuthors
@@ -401,6 +448,8 @@ struct Paper: Identifiable, Codable, Hashable {
         rating = PaperRatingScale.clamped(try container.decodeIfPresent(Int.self, forKey: .rating) ?? 0)
         doi = try container.decodeIfPresent(String.self, forKey: .doi) ?? ""
         abstractText = try container.decodeIfPresent(String.self, forKey: .abstractText) ?? ""
+        englishAbstract = try container.decodeIfPresent(String.self, forKey: .englishAbstract) ?? ""
+        chineseAbstract = try container.decodeIfPresent(String.self, forKey: .chineseAbstract) ?? ""
         notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
         collections = try container.decodeIfPresent([String].self, forKey: .collections) ?? []
         tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
@@ -424,6 +473,7 @@ struct Paper: Identifiable, Codable, Hashable {
         country = try container.decodeIfPresent(String.self, forKey: .country) ?? ""
         keywords = try container.decodeIfPresent(String.self, forKey: .keywords) ?? ""
         limitations = try container.decodeIfPresent(String.self, forKey: .limitations) ?? ""
+        webPageURL = try container.decodeIfPresent(String.self, forKey: .webPageURL) ?? ""
         storageFolderName = try container.decodeIfPresent(String.self, forKey: .storageFolderName)
         storedPDFFileName = try container.decodeIfPresent(String.self, forKey: .storedPDFFileName)
         originalPDFFileName = try container.decodeIfPresent(String.self, forKey: .originalPDFFileName)
@@ -437,6 +487,9 @@ struct Paper: Identifiable, Codable, Hashable {
         }
         lastOpenedAt = try container.decodeIfPresent(Date.self, forKey: .lastOpenedAt)
         lastEditedAtMilliseconds = try container.decodeIfPresent(Int64.self, forKey: .lastEditedAtMilliseconds)
+        deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
+        searchIndexBlob = ""
+        refreshDerivedSearchData()
     }
 
     var imageSortKey: String {
@@ -465,8 +518,75 @@ struct Paper: Identifiable, Codable, Hashable {
         return Date(timeIntervalSince1970: TimeInterval(lastEditedAtMilliseconds) / 1_000)
     }
 
+    var isDeleted: Bool {
+        deletedAt != nil
+    }
+
     static func currentTimestampMilliseconds() -> Int64 {
         Int64((Date().timeIntervalSince1970 * 1_000).rounded())
+    }
+
+    mutating func refreshDerivedSearchData() {
+        searchMetadata = PaperSearchMetadata(authors: authors)
+        searchIndexBlob = Self.makeSearchIndexBlob(from: self)
+    }
+
+    private static func makeSearchIndexBlob(from paper: Paper) -> String {
+        let fragments: [String] = [
+            paper.title,
+            paper.chineseTitle,
+            paper.englishTitle,
+            paper.authors,
+            paper.authorsEnglish,
+            paper.year,
+            paper.source,
+            paper.doi,
+            paper.abstractText,
+            paper.englishAbstract,
+            paper.chineseAbstract,
+            paper.notes,
+            paper.paperType,
+            paper.volume,
+            paper.issue,
+            paper.pages,
+            paper.rqs,
+            paper.conclusion,
+            paper.results,
+            paper.category,
+            paper.impactFactor,
+            paper.samples,
+            paper.participantType,
+            paper.variables,
+            paper.dataCollection,
+            paper.dataAnalysis,
+            paper.methodology,
+            paper.theoreticalFoundation,
+            paper.educationalLevel,
+            paper.country,
+            paper.keywords,
+            paper.limitations,
+            paper.webPageURL,
+            paper.collections.joined(separator: " "),
+            paper.tags.joined(separator: " "),
+            paper.imageFileNames.joined(separator: " ")
+        ]
+
+        return fragments
+            .map(AuthorNameParser.normalizedToken(from:))
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+}
+
+struct TaxonomyItemMetadata: Codable, Hashable {
+    var itemDescription: String
+    var iconSystemName: String
+    var colorHex: String
+
+    init(itemDescription: String = "", iconSystemName: String = "", colorHex: String = "") {
+        self.itemDescription = itemDescription
+        self.iconSystemName = iconSystemName
+        self.colorHex = colorHex
     }
 }
 
@@ -475,17 +595,23 @@ struct LibrarySnapshot: Codable {
     var collections: [String]
     var tags: [String]
     var tagColorHexes: [String: String]
+    var collectionMetadata: [String: TaxonomyItemMetadata]
+    var tagMetadata: [String: TaxonomyItemMetadata]
 
     init(
         papers: [Paper],
         collections: [String],
         tags: [String],
-        tagColorHexes: [String: String] = [:]
+        tagColorHexes: [String: String] = [:],
+        collectionMetadata: [String: TaxonomyItemMetadata] = [:],
+        tagMetadata: [String: TaxonomyItemMetadata] = [:]
     ) {
         self.papers = papers
         self.collections = collections
         self.tags = tags
         self.tagColorHexes = tagColorHexes
+        self.collectionMetadata = collectionMetadata
+        self.tagMetadata = tagMetadata
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -493,6 +619,8 @@ struct LibrarySnapshot: Codable {
         case collections
         case tags
         case tagColorHexes
+        case collectionMetadata
+        case tagMetadata
     }
 
     init(from decoder: Decoder) throws {
@@ -501,6 +629,8 @@ struct LibrarySnapshot: Codable {
         collections = try container.decode([String].self, forKey: .collections)
         tags = try container.decode([String].self, forKey: .tags)
         tagColorHexes = try container.decodeIfPresent([String: String].self, forKey: .tagColorHexes) ?? [:]
+        collectionMetadata = try container.decodeIfPresent([String: TaxonomyItemMetadata].self, forKey: .collectionMetadata) ?? [:]
+        tagMetadata = try container.decodeIfPresent([String: TaxonomyItemMetadata].self, forKey: .tagMetadata) ?? [:]
     }
 }
 
@@ -520,6 +650,98 @@ enum TaxonomyKind: String, CaseIterable, Identifiable {
     }
 }
 
+enum TaxonomyHierarchy {
+    static let separator = "/"
+    static let maximumDepth = 3
+
+    static func components(for path: String) -> [String] {
+        path
+            .split(separator: Character(separator), omittingEmptySubsequences: true)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    static func normalizedPath(_ rawPath: String) -> String {
+        components(for: rawPath)
+            .prefix(maximumDepth)
+            .joined(separator: separator)
+    }
+
+    static func path(parent: String?, name: String) -> String {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return "" }
+        var parts = parent.map(components(for:)) ?? []
+        parts.append(trimmedName)
+        return parts.prefix(maximumDepth).joined(separator: separator)
+    }
+
+    static func parentPath(of path: String) -> String? {
+        let parts = components(for: path)
+        guard parts.count > 1 else { return nil }
+        return parts.dropLast().joined(separator: separator)
+    }
+
+    static func leafName(of path: String) -> String {
+        components(for: path).last ?? path
+    }
+
+    static func depth(of path: String) -> Int {
+        components(for: path).count
+    }
+
+    static func isDescendant(_ path: String, of ancestor: String) -> Bool {
+        guard !ancestor.isEmpty else { return false }
+        return path == ancestor || path.hasPrefix("\(ancestor)\(separator)")
+    }
+
+    static func ancestors(of path: String) -> [String] {
+        let parts = components(for: path)
+        guard parts.count > 1 else { return [] }
+        return (1..<parts.count).map { parts.prefix($0).joined(separator: separator) }
+    }
+}
+
+struct TaxonomyNode: Identifiable, Hashable {
+    var id: String { path }
+    var path: String
+    var name: String
+    var depth: Int
+    var children: [TaxonomyNode]
+
+    var hasChildren: Bool {
+        !children.isEmpty
+    }
+
+    static func tree(from paths: [String]) -> [TaxonomyNode] {
+        let normalizedPaths = Set(
+            paths
+                .map(TaxonomyHierarchy.normalizedPath)
+                .filter { !$0.isEmpty }
+                .flatMap { [$0] + TaxonomyHierarchy.ancestors(of: $0) }
+        )
+
+        func children(for parent: String?, depth: Int) -> [TaxonomyNode] {
+            normalizedPaths
+                .filter { path in
+                    TaxonomyHierarchy.parentPath(of: path) == parent
+                }
+                .sorted { lhs, rhs in
+                    TaxonomyHierarchy.leafName(of: lhs).localizedStandardCompare(TaxonomyHierarchy.leafName(of: rhs)) == .orderedAscending
+                }
+                .map { path in
+                    TaxonomyNode(
+                        path: path,
+                        name: TaxonomyHierarchy.leafName(of: path),
+                        depth: depth,
+                        children: children(for: path, depth: depth + 1)
+                    )
+                }
+        }
+
+        return children(for: nil, depth: 0)
+    }
+}
+
 enum SystemLibrary: String, CaseIterable, Hashable {
     case all
     case recentReading
@@ -527,6 +749,7 @@ enum SystemLibrary: String, CaseIterable, Hashable {
     case unfiled
     case missingDOI
     case missingAttachment
+    case recentlyDeleted
 
     var title: String {
         switch self {
@@ -535,13 +758,15 @@ enum SystemLibrary: String, CaseIterable, Hashable {
         case .recentReading:
             return "最近阅读"
         case .zombiePapers:
-            return "Zombie Papers"
+            return "僵尸文献"
         case .unfiled:
             return "未整理"
         case .missingDOI:
             return "缺失 DOI"
         case .missingAttachment:
             return "缺失附件"
+        case .recentlyDeleted:
+            return "最近删除"
         }
     }
 
@@ -559,6 +784,8 @@ enum SystemLibrary: String, CaseIterable, Hashable {
             return "magnifyingglass.circle"
         case .missingAttachment:
             return "paperclip"
+        case .recentlyDeleted:
+            return "trash"
         }
     }
 }

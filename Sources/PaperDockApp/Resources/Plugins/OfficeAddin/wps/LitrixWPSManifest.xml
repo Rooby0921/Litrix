@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+           xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+           xsi:type="TaskPaneApp">
+  <Id>1d7e6ac2-fc73-480e-a57e-0950564d71b3</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>Litrix</ProviderName>
+  <DefaultLocale>zh-CN</DefaultLocale>
+  <DisplayName DefaultValue="Litrix 引用"/>
+  <Description DefaultValue="在 WPS 中搜索 Litrix 文库并插入引文。"/>
+  <IconUrl DefaultValue="http://127.0.0.1:23121/common/assets/icon-32.svg"/>
+  <HighResolutionIconUrl DefaultValue="http://127.0.0.1:23121/common/assets/icon-80.svg"/>
+  <SupportUrl DefaultValue="http://127.0.0.1:23121/LitrixOfficeAddin-README.md"/>
+  <AppDomains>
+    <AppDomain>http://127.0.0.1:23121</AppDomain>
+    <AppDomain>http://127.0.0.1:23122</AppDomain>
+  </AppDomains>
+  <Hosts>
+    <Host Name="Document"/>
+  </Hosts>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="http://127.0.0.1:23121/common/taskpane.html"/>
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+                    xsi:type="VersionOverridesV1_0">
+    <Hosts>
+      <Host xsi:type="Document">
+        <DesktopFormFactor>
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <CustomTab id="Litrix.Tab">
+              <Group id="Litrix.Group">
+                <Label resid="Litrix.GroupLabel"/>
+                <Icon>
+                  <bt:Image size="16" resid="Icon.16"/>
+                  <bt:Image size="32" resid="Icon.32"/>
+                  <bt:Image size="80" resid="Icon.80"/>
+                </Icon>
+                <Control xsi:type="Button" id="Litrix.CitationStyle">
+                  <Label resid="CitationStyle.Label"/>
+                  <Supertip>
+                    <Title resid="CitationStyle.Label"/>
+                    <Description resid="CitationStyle.Tooltip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>Litrix.Taskpane</TaskpaneId>
+                    <SourceLocation resid="Taskpane.Url"/>
+                  </Action>
+                </Control>
+                <Control xsi:type="Button" id="Litrix.CitationType">
+                  <Label resid="CitationType.Label"/>
+                  <Supertip>
+                    <Title resid="CitationType.Label"/>
+                    <Description resid="CitationType.Tooltip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>Litrix.Taskpane</TaskpaneId>
+                    <SourceLocation resid="Taskpane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+              <Label resid="Litrix.TabLabel"/>
+            </CustomTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Icon.16" DefaultValue="http://127.0.0.1:23121/common/assets/icon-16.svg"/>
+        <bt:Image id="Icon.32" DefaultValue="http://127.0.0.1:23121/common/assets/icon-32.svg"/>
+        <bt:Image id="Icon.80" DefaultValue="http://127.0.0.1:23121/common/assets/icon-80.svg"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="Taskpane.Url" DefaultValue="http://127.0.0.1:23121/common/taskpane.html"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="Litrix.TabLabel" DefaultValue="Litrix"/>
+        <bt:String id="Litrix.GroupLabel" DefaultValue="Litrix"/>
+        <bt:String id="CitationStyle.Label" DefaultValue="引文格式"/>
+        <bt:String id="CitationType.Label" DefaultValue="引用格式"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="CitationStyle.Tooltip" DefaultValue="选择 APA-7、GB/T 7714、MLA 或 Chicago 引文格式。"/>
+        <bt:String id="CitationType.Tooltip" DefaultValue="选择文内引用、自动脚注或自动尾注。"/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>

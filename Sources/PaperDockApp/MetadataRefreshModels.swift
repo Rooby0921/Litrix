@@ -28,6 +28,7 @@ enum MetadataField: String, CaseIterable, Codable, Hashable, Identifiable {
     case source
     case doi
     case abstractText
+    case chineseAbstract
     case volume
     case issue
     case pages
@@ -61,6 +62,7 @@ enum MetadataField: String, CaseIterable, Codable, Hashable, Identifiable {
         case .source: return "Source"
         case .doi: return "DOI"
         case .abstractText: return "Abstract"
+        case .chineseAbstract: return "Chinese Abstract"
         case .volume: return "Volume"
         case .issue: return "Issue"
         case .pages: return "Pages"
@@ -84,6 +86,24 @@ enum MetadataField: String, CaseIterable, Codable, Hashable, Identifiable {
         }
     }
 
+    func displayName(for language: AppLanguage) -> String {
+        guard language == .chinese else { return displayName }
+        if let tableColumn {
+            return tableColumn.displayName(for: language)
+        }
+
+        switch self {
+        case .doi: return "DOI"
+        case .abstractText: return "摘要"
+        case .chineseAbstract: return "中文摘要"
+        case .volume: return "卷"
+        case .issue: return "期"
+        case .pages: return "页码"
+        case .paperType: return "文献类型"
+        default: return displayName
+        }
+    }
+
     var tableColumn: PaperTableColumn? {
         switch self {
         case .title: return .title
@@ -92,6 +112,8 @@ enum MetadataField: String, CaseIterable, Codable, Hashable, Identifiable {
         case .authorsEnglish: return .authorsEnglish
         case .year: return .year
         case .source: return .source
+        case .abstractText: return .abstractText
+        case .chineseAbstract: return .chineseAbstract
         case .rqs: return .rqs
         case .conclusion: return .conclusion
         case .results: return .results
@@ -108,7 +130,7 @@ enum MetadataField: String, CaseIterable, Codable, Hashable, Identifiable {
         case .country: return .country
         case .keywords: return .keywords
         case .limitations: return .limitations
-        case .doi, .abstractText, .volume, .issue, .pages, .paperType:
+        case .doi, .volume, .issue, .pages, .paperType:
             return nil
         }
     }
@@ -123,6 +145,7 @@ enum MetadataField: String, CaseIterable, Codable, Hashable, Identifiable {
         case .source: return paper.source
         case .doi: return paper.doi
         case .abstractText: return paper.abstractText
+        case .chineseAbstract: return paper.chineseAbstract
         case .volume: return paper.volume
         case .issue: return paper.issue
         case .pages: return paper.pages
@@ -160,6 +183,7 @@ enum MetadataField: String, CaseIterable, Codable, Hashable, Identifiable {
         case .source: paper.source = value
         case .doi: paper.doi = value
         case .abstractText: paper.abstractText = value
+        case .chineseAbstract: paper.chineseAbstract = value
         case .volume: paper.volume = value
         case .issue: paper.issue = value
         case .pages: paper.pages = value
@@ -193,6 +217,7 @@ enum MetadataField: String, CaseIterable, Codable, Hashable, Identifiable {
         case .source: return suggestion.source
         case .doi: return suggestion.doi
         case .abstractText: return suggestion.abstractText
+        case .chineseAbstract: return suggestion.chineseAbstract
         case .volume: return suggestion.volume
         case .issue: return suggestion.issue
         case .pages: return suggestion.pages
@@ -224,7 +249,7 @@ extension Paper {
         mode: MetadataRefreshMode
     ) {
         for field in fields {
-            let incoming = field.value(in: suggestion)
+            let incoming = MetadataValueNormalizer.normalize(field.value(in: suggestion), for: field)
             switch mode {
             case .refreshAll, .customRefresh:
                 field.assign(incoming, to: &self)

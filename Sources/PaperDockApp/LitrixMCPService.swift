@@ -92,7 +92,7 @@ final class LitrixMCPToolService {
                         ],
                         "field": [
                             "type": "string",
-                            "description": "Optional field restriction such as title, authors, abstractText, tags, or collections."
+                            "description": "Optional field restriction such as title, authors, abstractText, chineseAbstract, tags, or collections."
                         ],
                         "scope": [
                             "type": "string",
@@ -449,11 +449,7 @@ final class LitrixMCPToolService {
             schema["required"] = required
         }
         if requiredAnySelector {
-            schema["anyOf"] = [
-                ["required": ["item_id"]],
-                ["required": ["doi"]],
-                ["required": ["title"]]
-            ]
+            schema["description"] = "Provide exactly one item selector: item_id, doi, or title. Litrix validates the selector at runtime."
         }
         return schema
     }
@@ -648,14 +644,27 @@ final class LitrixMCPToolService {
             MetadataFieldDescriptor(
                 name: "abstractText",
                 displayName: "Abstract",
-                description: "Abstract text.",
+                description: "Abstract text in the source language.",
                 valueType: "string",
                 editable: true,
                 hidden: false,
                 group: "content",
                 jsonSchema: [
                     "type": "string",
-                    "description": "Abstract text."
+                    "description": "Abstract text in the source language."
+                ]
+            ),
+            MetadataFieldDescriptor(
+                name: "chineseAbstract",
+                displayName: "Chinese Abstract",
+                description: "Chinese-language abstract, translated or summarized from the source when needed.",
+                valueType: "string",
+                editable: true,
+                hidden: false,
+                group: "content",
+                jsonSchema: [
+                    "type": "string",
+                    "description": "Chinese-language abstract."
                 ]
             ),
             MetadataFieldDescriptor(
@@ -960,6 +969,19 @@ final class LitrixMCPToolService {
                 ]
             ),
             MetadataFieldDescriptor(
+                name: "webPageURL",
+                displayName: "Web Page URL",
+                description: "Original web page link used for browser import and web metadata refresh.",
+                valueType: "string",
+                editable: true,
+                hidden: false,
+                group: "bibliographic",
+                jsonSchema: [
+                    "type": "string",
+                    "description": "Original web page link used for browser import and web metadata refresh."
+                ]
+            ),
+            MetadataFieldDescriptor(
                 name: "storageFolderName",
                 displayName: "Storage Folder Name",
                 description: "Internal paper folder name under the Litrix papers directory.",
@@ -1216,10 +1238,13 @@ final class LitrixMCPToolService {
         let paper = try resolvePaper(arguments: arguments)
         let maxChars = resolvedOptionalCharLimit(arguments["max_chars"])
         let abstractText = limitedText(paper.abstractText, maxChars: maxChars)
+        let chineseAbstract = limitedText(paper.chineseAbstract, maxChars: maxChars)
         return [
             "item": minimalItemIdentity(paper),
             "abstract": abstractText,
-            "abstractLength": paper.abstractText.count
+            "abstractLength": paper.abstractText.count,
+            "chineseAbstract": chineseAbstract,
+            "chineseAbstractLength": paper.chineseAbstract.count
         ]
     }
 
@@ -1848,6 +1873,8 @@ final class LitrixMCPToolService {
                 paper.doi = try requiredString(value, label: key)
             case "abstractText":
                 paper.abstractText = try requiredString(value, label: key)
+            case "chineseAbstract":
+                paper.chineseAbstract = try requiredString(value, label: key)
             case "notes":
                 paper.notes = try requiredString(value, label: key)
             case "collections":
@@ -1894,6 +1921,8 @@ final class LitrixMCPToolService {
                 paper.keywords = try requiredString(value, label: key)
             case "limitations":
                 paper.limitations = try requiredString(value, label: key)
+            case "webPageURL":
+                paper.webPageURL = try requiredString(value, label: key)
             case "storageFolderName":
                 paper.storageFolderName = try optionalPathComponent(value, label: key)
             case "storedPDFFileName":
@@ -2028,6 +2057,7 @@ final class LitrixMCPToolService {
             "year": paper.year,
             "source": paper.source,
             "doi": paper.doi,
+            "webPageURL": paper.webPageURL,
             "collections": paper.collections,
             "tags": paper.tags,
             "hasPDF": store.hasExistingPDFAttachment(for: paper)
@@ -2062,6 +2092,7 @@ final class LitrixMCPToolService {
             "rating": paper.rating,
             "doi": paper.doi,
             "abstractText": paper.abstractText,
+            "chineseAbstract": paper.chineseAbstract,
             "notes": paper.notes,
             "collections": paper.collections,
             "tags": paper.tags,
@@ -2085,6 +2116,7 @@ final class LitrixMCPToolService {
             "country": paper.country,
             "keywords": paper.keywords,
             "limitations": paper.limitations,
+            "webPageURL": paper.webPageURL,
             "storageFolderName": paper.storageFolderName as Any,
             "storedPDFFileName": paper.storedPDFFileName as Any,
             "originalPDFFileName": paper.originalPDFFileName as Any,
@@ -2118,6 +2150,7 @@ final class LitrixMCPToolService {
             ("englishTitle", \.englishTitle, 7),
             ("keywords", \.keywords, 6),
             ("abstractText", \.abstractText, 6),
+            ("chineseAbstract", \.chineseAbstract, 6),
             ("results", \.results, 5),
             ("conclusion", \.conclusion, 5),
             ("rqs", \.rqs, 4),
@@ -2179,6 +2212,7 @@ final class LitrixMCPToolService {
             paper.englishTitle,
             paper.keywords,
             paper.abstractText,
+            paper.chineseAbstract,
             paper.results,
             paper.conclusion,
             paper.rqs,
@@ -2313,7 +2347,7 @@ final class LitrixMCPToolService {
     }
 
     private func normalizedDOI(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        normalizeDOIIdentifier(value)
     }
 
     private func requiredDictionary(_ value: Any?, label: String) throws -> [String: Any] {
@@ -2509,6 +2543,7 @@ private extension KeyPath where Root == Paper, Value == String {
     static func englishTitle(_ paper: Paper) -> String { paper[keyPath: \.englishTitle] }
     static func keywords(_ paper: Paper) -> String { paper[keyPath: \.keywords] }
     static func abstractText(_ paper: Paper) -> String { paper[keyPath: \.abstractText] }
+    static func chineseAbstract(_ paper: Paper) -> String { paper[keyPath: \.chineseAbstract] }
     static func results(_ paper: Paper) -> String { paper[keyPath: \.results] }
     static func conclusion(_ paper: Paper) -> String { paper[keyPath: \.conclusion] }
     static func rqs(_ paper: Paper) -> String { paper[keyPath: \.rqs] }

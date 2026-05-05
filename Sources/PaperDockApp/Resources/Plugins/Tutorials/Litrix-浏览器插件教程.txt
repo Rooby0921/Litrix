@@ -1,0 +1,26 @@
+Litrix 浏览器插件教程（mac）
+
+用途
+浏览器插件用于从论文网页读取元数据，并在 Litrix 中创建文献条目。它会尝试读取标题、作者、年份、期刊或会议、DOI、摘要、关键词和 PDF 链接；发现 PDF 时，会优先用浏览器会话下载 PDF 并发送给 Litrix，失败时再让 Litrix 根据 PDF 链接下载。
+
+安装
+1. 打开 Litrix。
+2. 进入 Litrix 设置 > 引用 > 插件 > 网页插件。
+3. Chrome 或 Edge：打开 chrome://extensions，启用开发者模式，选择“加载已解压的扩展程序”，选择 BrowserImporter 文件夹。
+4. Firefox：打开 about:debugging#/runtime/this-firefox，选择“临时载入附加组件”，选择 BrowserImporter/manifest.json。
+5. Safari：点击“检查 Safari”或“安装 Safari 插件”。Litrix 会在后台生成并命令行编译 Safari 插件宿主 App，不需要打开 Xcode 界面。随后在 Safari 设置 > 扩展中启用 Litrix Safari Importer。
+
+使用
+1. 打开论文网页。
+2. 点击浏览器工具栏中的 Litrix 扩展。
+3. 点击“读取网页信息”。
+4. 确认标题、作者、DOI 和 PDF 链接。
+5. 点击“创建 Litrix 条目”。
+
+默认导入地址
+http://127.0.0.1:23122/mcp/web-import
+
+注意
+Litrix 需要保持运行。网页本身没有标准论文元数据时，插件会尽量从页面标题、Open Graph、Dublin Core、citation_*、JSON-LD 标签和 DOI 正则中识别信息。
+
+如果没有 Apple Developer Team ID，Safari 仍可本机使用，但属于未签名扩展。若 Safari 设置 > 扩展中没有 Litrix，请在 Safari 设置 > 高级中显示开发功能，然后在 Safari 菜单栏 > 开发中启用“允许未签名扩展”，再回到 Litrix 点击“检查 Safari”。

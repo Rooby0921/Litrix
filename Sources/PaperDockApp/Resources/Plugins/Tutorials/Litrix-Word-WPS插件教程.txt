@@ -1,0 +1,36 @@
+Litrix Word/WPS 插件教程（mac）
+
+用途
+- Word（mac）：使用 Office Add-in 任务面板搜索 Litrix 文库并插入引用。
+- WPS（mac）：使用 Litrix 快速引用 + WPS 桥接脚本插入行内引用/脚注。
+
+安装前准备
+1. 保持 Litrix 运行。
+2. 确认 Litrix 设置中的 MCP 服务已启用。
+3. 进入 Litrix 设置 > 引用。
+
+Word（mac）安装
+1. 点击“启动本地服务”。
+2. 在 OfficeAddin 文件夹中确认终端显示 `Serving HTTP on 127.0.0.1:23121`。
+3. 在 Word 侧载 `word/LitrixWordManifest.xml`。
+4. 功能区出现 Litrix 标签页后，点击“引文格式”或“引用格式”打开任务面板。
+
+WPS（mac）使用（推荐）
+1. 点击“WPS（mac）桥接脚本”，打开脚本目录。
+2. 在 Litrix 中触发快速引用（默认 `left ⌘ + right ⌘`），引用文本会自动复制到剪贴板。
+3. 切回 WPS：
+   - 运行 `insert-citation-inline.command` 粘贴行内引用；
+   - 或运行 `insert-citation-footnote.command`（尝试脚注快捷键后粘贴）。
+
+为什么你会看到“可用加载项为空”
+- `开发工具 > WPS 加载项` 显示的是当前可用加载项列表，不是 Office Web Add-in 的稳定侧载入口。
+- 在 mac 版 WPS 上，该入口经常为空，这是宿主兼容性问题，不是 Litrix 本地服务未启动。
+
+使用
+1. 选择“引文格式”，例如 APA-7。
+2. 选择“引用格式”，例如自动脚注。
+3. 输入标题、作者、关键词或 DOI，点击搜索。
+4. 选择结果并插入。
+
+说明
+插件通过 Litrix MCP 的 search_library 工具搜索本地文库。宿主不支持自动脚注或尾注接口时，会退回为插入普通文本或复制引用。

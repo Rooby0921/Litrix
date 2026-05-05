@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <title>Litrix</title>
+  <style>
+    body {
+      width: 380px;
+      margin: 0;
+      padding: 14px;
+      font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: CanvasText;
+      background: transparent;
+    }
+    label {
+      display: block;
+      margin: 0 0 5px;
+      color: #565a5f;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    input[type="text"],
+    textarea,
+    select {
+      box-sizing: border-box;
+      width: 100%;
+      padding: 4px 8px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      background: color-mix(in srgb, Canvas 82%, transparent);
+      color: CanvasText;
+      font: inherit;
+    }
+    input[type="text"],
+    select {
+      height: 29px;
+    }
+    textarea {
+      min-height: 56px;
+      resize: vertical;
+    }
+    select {
+      appearance: auto;
+    }
+    .field-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .field {
+      min-width: 0;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .actions {
+      justify-content: flex-end;
+    }
+    button {
+      border: 1px solid #1f7a57;
+      border-radius: 6px;
+      background: #24845f;
+      color: #fff;
+      padding: 6px 10px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.secondary {
+      border-color: #c9ced6;
+      background: #fff;
+      color: #1d1d1f;
+    }
+    button:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+    .preview {
+      max-height: 210px;
+      overflow: auto;
+      margin: 10px 0 0;
+      padding: 8px;
+      border: 1px solid #d8dde5;
+      border-radius: 7px;
+      background: transparent;
+    }
+    .preview.empty {
+      color: #7a7f86;
+      background: transparent;
+    }
+    .preview-row {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr);
+      gap: 8px;
+      padding: 4px 0;
+      border-bottom: 1px solid #edf0f4;
+    }
+    .preview-row:last-child {
+      border-bottom: none;
+    }
+    .preview-label {
+      color: #667085;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .preview-value {
+      min-width: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    #status {
+      min-height: 18px;
+      margin-top: 10px;
+      color: #565a5f;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="field-grid">
+    <div class="field">
+      <label for="collectionSelect">分类</label>
+      <select id="collectionSelect">
+        <option value="">无分类</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="newCollection">新建分类</label>
+      <input id="newCollection" type="text" placeholder="利用；区分多个项目">
+    </div>
+    <div class="field">
+      <label for="tagSelect">标签</label>
+      <select id="tagSelect">
+        <option value="">无标签</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="newTag">新建标签</label>
+      <input id="newTag" type="text" placeholder="利用；区分多个项目">
+    </div>
+  </div>
+
+  <div class="row">
+    <input id="includePDF" type="checkbox" checked>
+    <label for="includePDF" style="margin:0;font-weight:500;">有 PDF 链接时同时导入 PDF</label>
+  </div>
+
+  <div class="row actions">
+    <button id="importButton" disabled>创建条目</button>
+  </div>
+
+  <div id="preview" class="preview empty">正在读取网页信息...</div>
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
